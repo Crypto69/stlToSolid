@@ -14,7 +14,10 @@ import os
 IMAGE_EXTS = ('jpg', 'jpeg', 'png', 'webp')
 IMAGE_MEDIA = {'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png', 'webp': 'image/webp'}
 MAX_IMAGE = int(os.environ.get('STLTOSOLID_MAX_IMAGE', 20 * 1024 * 1024))
-READ_TIMEOUT_S = float(os.environ.get('STLTOSOLID_BLUEPRINT_TIMEOUT', 300))
+# seconds one read may take: STLTOSOLID_BLUEPRINT_TIMEOUT for every provider
+# when set, else the provider's own (DeepSeek thinks for minutes at max effort)
+_READ_TIMEOUT_ENV = os.environ.get('STLTOSOLID_BLUEPRINT_TIMEOUT')
+READ_TIMEOUT_S = float(_READ_TIMEOUT_ENV or 300)
 
 # The vision providers the panel offers. `env` is the server-side key's
 # variable; `base_url` None means the SDK's default endpoint; 'custom'
@@ -28,10 +31,12 @@ PRESETS = {
     'openai': {'label': 'OpenAI', 'default_model': 'gpt-5.5', 'base_url': None,
                'env': 'STLTOSOLID_OPENAI_API_KEY', 'sdk': 'openai', 'needs_key': True,
                'note': 'Model names change; edit the model if the API says it does not exist.'},
-    'deepseek': {'label': 'DeepSeek', 'default_model': 'deepseek-chat', 'base_url': 'https://api.deepseek.com',
+    'deepseek': {'label': 'DeepSeek', 'default_model': 'deepseek-flash', 'base_url': 'https://api.deepseek.com',
                  'env': 'STLTOSOLID_DEEPSEEK_API_KEY', 'sdk': 'openai', 'needs_key': True,
-                 'note': "DeepSeek's hosted API may not accept images; if it refuses, the server's "
-                         'own message is shown here.'},
+                 'timeout': 1200,
+                 'note': 'Use deepseek-flash: it reads images. deepseek-v4-pro does not take images, '
+                         'so it cannot read a drawing. Thinking is switched on; Effort high asks for '
+                         "DeepSeek's max."},
     'custom': {'label': 'Custom (OpenAI-compatible URL)', 'default_model': '', 'base_url': '',
                'env': 'STLTOSOLID_CUSTOM_API_KEY', 'sdk': 'openai', 'needs_key': False,
                'note': 'Any OpenAI-compatible server: base URL and model are yours to type. Ollama '
@@ -48,6 +53,12 @@ def server_key(provider):
     if not p:
         return None
     return os.environ.get(p['env']) or None
+
+
+def read_timeout(provider):
+    if _READ_TIMEOUT_ENV:
+        return READ_TIMEOUT_S
+    return float(PRESETS[provider].get('timeout', READ_TIMEOUT_S))
 
 
 def resolve_key(provider, header_key):

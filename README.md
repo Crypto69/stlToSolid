@@ -181,8 +181,12 @@ storage and sent with each read as a header; the server uses it for
 that one call and never writes it to disk or a log. With no key in the
 browser the server's own `STLTOSOLID_<PROVIDER>_API_KEY` is used when
 set — an opt-in for a private install, since anyone who can reach the
-app could spend it. DeepSeek's hosted API may not accept images; if it
-refuses, its own message is shown. The drawing is sent to the provider
+app could spend it. DeepSeek: use `deepseek-flash` (the default), which
+reads images; `deepseek-v4-pro` takes no images. Both get thinking
+switched on explicitly and JSON mode (`json_object`, the schema in the
+prompt, since DeepSeek has no `json_schema`); Effort low / medium / high
+maps to DeepSeek's low / high / max, and the image goes at detail
+`original` (full resolution). The drawing is sent to the provider
 you pick and nowhere else.
 
 Routes: `POST /api/blueprints` (the image; .jpg, .png or .webp, up to
@@ -367,7 +371,8 @@ spend fitting its slices before it answers 400, default 240 — under a
 browser's 300 s response limit), `STLTOSOLID_ANTHROPIC_API_KEY` /
 `STLTOSOLID_OPENAI_API_KEY` / `STLTOSOLID_DEEPSEEK_API_KEY` (Blueprint's
 opt-in server-side keys), `STLTOSOLID_BLUEPRINT_TIMEOUT` (seconds one
-read of a drawing may take, default 300), `STLTOSOLID_MAX_IMAGE` (bytes,
+read of a drawing may take, default 300, and 1200 for DeepSeek, whose max
+effort thinks for several minutes; when set it applies to every provider), `STLTOSOLID_MAX_IMAGE` (bytes,
 default 20 MB), `STLTOSOLID_PREVIEW_TIMEOUT` (seconds one live preview
 may take in the helper before it is killed and restarted, default 45).
 The budgets are backstops: a shell that reaches one is scored on

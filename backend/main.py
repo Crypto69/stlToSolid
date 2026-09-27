@@ -555,7 +555,7 @@ def blueprint_read(job_id: str, body: ReadBody,
 
     def read_fn():
         return read_drawing(image, body.provider, key or '', model=model, base_url=base_url,
-                            hints=hints, timeout=bp.READ_TIMEOUT_S, effort=effort)
+                            hints=hints, timeout=bp.read_timeout(body.provider), effort=effort)
 
     def then_params(res):
         return {'tool': 'blueprint', 'recipe': res['recipe'], 'title': stem,

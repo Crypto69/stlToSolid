@@ -1,9 +1,10 @@
 """The vision providers behind Blueprint, one small adapter each:
 Anthropic through its SDK (structured output by JSON schema), and every
 OpenAI-compatible chat endpoint through the openai SDK (OpenAI itself,
-DeepSeek, Ollama, OpenRouter... by base URL), which tries strict JSON
-schema, then json_object, then plain text, since compatible servers
-differ in what they accept.
+Ollama, OpenRouter... by base URL), which tries strict JSON schema, then
+json_object, then plain text, since compatible servers differ in what
+they accept. DeepSeek is its own small variant of that one: json_object
+with the schema in the prompt, and thinking switched on.
 
 Each adapter's complete() takes the same neutral request and returns
 (text, usage, model). Failures come back as ReadError with a sentence
@@ -11,6 +12,7 @@ for the user; the key is used for the one client and never repeated in
 any message.
 """
 import base64
+import json
 
 
 class ReadError(RuntimeError):
@@ -25,6 +27,9 @@ class ReadError(RuntimeError):
 # the model's thinking counts against this too, so it is generous; the
 # request streams so the HTTP connection is not held open for one answer
 MAX_TOKENS = 64000
+# DeepSeek at max effort thought for 88k tokens on the SG90 sheet (and ran
+# out at 64k); its ceiling is 384k
+DEEPSEEK_MAX_TOKENS = 256000
 
 
 class Provider:
@@ -102,34 +107,48 @@ class AnthropicProvider(Provider):
 class OpenAICompatibleProvider(Provider):
     name = 'openai'
 
+    def _system(self, system, schema):
+        return system
+
+    def _formats(self, schema):
+        """response_format values to try in order (None: plain text)."""
+        return [
+            {'type': 'json_schema', 'json_schema': {'name': 'recipe', 'schema': schema, 'strict': True}},
+            {'type': 'json_object'},
+            None,
+        ]
+
+    def _knobs(self, effort):
+        """(reasoning_effort or None, other request kwargs)."""
+        return effort, {}
+
+    def _image(self, url):
+        return {'url': url}
+
     def complete(self, system, image_bytes, media_type, text, schema, history=(), effort='high'):
         import openai
         effort = effort if effort in EFFORTS else 'high'
         client = openai.OpenAI(api_key=self.api_key or 'none', base_url=self.base_url,
                                timeout=self.timeout, max_retries=2)
         b64 = base64.standard_b64encode(image_bytes).decode('ascii')
-        messages = [{'role': 'system', 'content': system},
+        messages = [{'role': 'system', 'content': self._system(system, schema)},
                     {'role': 'user', 'content': [
-                        {'type': 'image_url', 'image_url': {'url': f'data:{media_type};base64,{b64}'}},
+                        {'type': 'image_url', 'image_url': self._image(f'data:{media_type};base64,{b64}')},
                         {'type': 'text', 'text': text}]}]
         messages += [{'role': r, 'content': t} for r, t in history]
-        formats = [
-            {'type': 'json_schema', 'json_schema': {'name': 'recipe', 'schema': schema, 'strict': True}},
-            {'type': 'json_object'},
-            None,
-        ]
         resp = None
         # the OpenAI reasoning knob; a compatible server that does not know it
         # gets the same request without it
-        send_effort = True
-        attempts = list(formats)
+        reasoning, extra = self._knobs(effort)
+        send_effort = reasoning is not None
+        attempts = self._formats(schema)
         while attempts:
             fmt = attempts[0]
-            kwargs = dict(model=self.model, messages=messages)
+            kwargs = dict(model=self.model, messages=messages, **extra)
             if fmt is not None:
                 kwargs['response_format'] = fmt
             if send_effort:
-                kwargs['reasoning_effort'] = effort
+                kwargs['reasoning_effort'] = reasoning
             try:
                 resp = client.chat.completions.create(**kwargs)
                 break
@@ -168,14 +187,54 @@ class OpenAICompatibleProvider(Provider):
         if getattr(msg, 'refusal', None):
             raise ReadError('The model declined to read this image: ' + _short(msg.refusal), 'refusal')
         if getattr(choice, 'finish_reason', None) == 'length':
-            raise ReadError('The answer was cut off; try a drawing with fewer features.', 'truncated')
+            raise ReadError('The answer was cut off (the model ran out of room, often while thinking); '
+                            'try a lower Effort or a drawing with fewer features.', 'truncated')
         out = msg.content or ''
         if isinstance(out, list):            # some servers return content parts
             out = ''.join(p.get('text', '') if isinstance(p, dict) else getattr(p, 'text', '') for p in out)
+        if not out.strip():
+            # DeepSeek's JSON mode is documented to do this now and then
+            raise ReadError(f'{_where(self)} returned an empty answer; read the drawing again.', 'api')
         u = getattr(resp, 'usage', None)
         usage = {'input_tokens': getattr(u, 'prompt_tokens', None),
                  'output_tokens': getattr(u, 'completion_tokens', None)}
         return out, usage, getattr(resp, 'model', None) or self.model
+
+
+class DeepSeekProvider(OpenAICompatibleProvider):
+    """DeepSeek's hosted API (api-docs.deepseek.com). JSON mode is
+    json_object only (no json_schema), so the schema goes into the system
+    prompt, which must also say "json". deepseek-flash and deepseek-v4-pro
+    get thinking switched on explicitly (it is their default, but the
+    request should not depend on that), with DeepSeek's effort scale
+    low / high / max: the panel's medium has no match and rounds up, and
+    its high asks for max. max_tokens is set, so thinking plus a long
+    recipe is not cut off at a server default. The image goes at detail
+    'original' (full resolution)."""
+    name = 'deepseek'
+    EFFORT = {'low': 'low', 'medium': 'high', 'high': 'max'}
+
+    def _thinking_model(self):
+        m = (self.model or '').lower()
+        return 'flash' in m or 'pro' in m
+
+    def _system(self, system, schema):
+        return (system + '\n\nAnswer with one json object and nothing else: the recipe, '
+                'following this JSON schema exactly:\n' + json.dumps(schema, separators=(',', ':')))
+
+    def _formats(self, schema):
+        return [{'type': 'json_object'}]
+
+    def _image(self, url):
+        # full resolution: 'low' would shrink the sheet to 512 px and lose the labels
+        return {'url': url, 'detail': 'original'}
+
+    def _knobs(self, effort):
+        extra = {'max_tokens': DEEPSEEK_MAX_TOKENS}
+        if not self._thinking_model():
+            return None, extra
+        extra['extra_body'] = {'thinking': {'type': 'enabled'}}
+        return self.EFFORT[effort], extra
 
 
 def _msg(e):
@@ -200,6 +259,8 @@ def _where(p):
 def make_provider(provider, api_key, model, base_url=None, timeout=300.0):
     if provider == 'anthropic':
         return AnthropicProvider(api_key, model, None, timeout)
-    if provider in ('openai', 'deepseek', 'custom'):
+    if provider == 'deepseek':
+        return DeepSeekProvider(api_key, model, base_url, timeout)
+    if provider in ('openai', 'custom'):
         return OpenAICompatibleProvider(api_key, model, base_url, timeout)
     raise ReadError(f'unknown provider {provider!r}', 'api')

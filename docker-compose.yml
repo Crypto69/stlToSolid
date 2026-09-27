@@ -42,7 +42,7 @@ services:
       # STLTOSOLID_ANTHROPIC_API_KEY: "sk-ant-…"
       # STLTOSOLID_OPENAI_API_KEY: "sk-…"
       # STLTOSOLID_DEEPSEEK_API_KEY: "…"
-      # seconds one read of a drawing may take (default 300)
+      # seconds one read of a drawing may take (default 300; DeepSeek 1200)
       # STLTOSOLID_BLUEPRINT_TIMEOUT: "300"
       # largest drawing image accepted, bytes (default 20 MB)
       # STLTOSOLID_MAX_IMAGE: "20971520"

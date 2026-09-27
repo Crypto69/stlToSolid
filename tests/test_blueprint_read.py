@@ -116,7 +116,78 @@ def test_read_drawing_unparseable_answer():
 
 def test_make_provider():
     assert make_provider('anthropic', 'k', 'claude-opus-5').name == 'anthropic'
-    p = make_provider('deepseek', 'k', 'deepseek-chat', 'https://api.deepseek.com')
-    assert p.name == 'openai' and p.base_url == 'https://api.deepseek.com'
+    p = make_provider('deepseek', 'k', 'deepseek-flash', 'https://api.deepseek.com')
+    assert p.name == 'deepseek' and p.base_url == 'https://api.deepseek.com'
+    assert make_provider('custom', 'k', 'llava', 'http://localhost:11434/v1').name == 'openai'
     with pytest.raises(ReadError):
         make_provider('gemini', 'k', 'x')
+
+
+class _FakeOpenAI:
+    """Stands in for openai.OpenAI: records each chat request, answers `reply`."""
+    requests = []
+    reply = '{"ok": true}'
+
+    def __init__(self, **kw):
+        self.chat = self
+        self.completions = self
+
+    def create(self, **kw):
+        _FakeOpenAI.requests.append(kw)
+        from types import SimpleNamespace as NS
+        msg = NS(content=_FakeOpenAI.reply, refusal=None)
+        return NS(choices=[NS(message=msg, finish_reason='stop')], model=kw['model'],
+                  usage=NS(prompt_tokens=10, completion_tokens=5))
+
+
+@pytest.fixture
+def fake_openai(monkeypatch):
+    openai = pytest.importorskip('openai')
+    _FakeOpenAI.requests = []
+    _FakeOpenAI.reply = '{"ok": true}'
+    monkeypatch.setattr(openai, 'OpenAI', _FakeOpenAI)
+    return _FakeOpenAI
+
+
+@pytest.mark.parametrize('model', ['deepseek-flash', 'deepseek-v4-pro'])
+@pytest.mark.parametrize('effort,sent', [('low', 'low'), ('medium', 'high'), ('high', 'max')])
+def test_deepseek_thinking_and_json(fake_openai, model, effort, sent):
+    from stl_to_solid.blueprint.providers import DEEPSEEK_MAX_TOKENS
+    p = make_provider('deepseek', 'k', model, 'https://api.deepseek.com')
+    out, _, _ = p.complete('SYS', _png_bytes((80, 60)), 'image/png', 'read it', {'type': 'object'},
+                           effort=effort)
+    assert out == '{"ok": true}'
+    (req,) = fake_openai.requests
+    assert req['extra_body'] == {'thinking': {'type': 'enabled'}}
+    assert req['reasoning_effort'] == sent
+    assert req['response_format'] == {'type': 'json_object'}
+    assert req['max_tokens'] == DEEPSEEK_MAX_TOKENS
+    system = req['messages'][0]['content']
+    assert system.startswith('SYS') and 'json' in system and '{"type":"object"}' in system
+    image = req['messages'][1]['content'][0]['image_url']
+    assert image['detail'] == 'original' and image['url'].startswith('data:image/png;base64,')
+
+
+def test_deepseek_other_model_gets_no_thinking(fake_openai):
+    p = make_provider('deepseek', 'k', 'deepseek-legacy', 'https://api.deepseek.com')
+    p.complete('SYS', _png_bytes((80, 60)), 'image/png', 'read it', {'type': 'object'})
+    (req,) = fake_openai.requests
+    assert 'extra_body' not in req and 'reasoning_effort' not in req
+    assert req['response_format'] == {'type': 'json_object'}
+
+
+def test_openai_request_unchanged(fake_openai):
+    p = make_provider('openai', 'k', 'gpt-5.5')
+    p.complete('SYS', _png_bytes((80, 60)), 'image/png', 'read it', {'type': 'object'}, effort='medium')
+    (req,) = fake_openai.requests
+    assert req['response_format']['type'] == 'json_schema' and req['reasoning_effort'] == 'medium'
+    assert 'extra_body' not in req and 'max_tokens' not in req
+    assert req['messages'][0]['content'] == 'SYS'
+    assert 'detail' not in req['messages'][1]['content'][0]['image_url']
+
+
+def test_empty_answer_is_a_readable_error(fake_openai):
+    fake_openai.reply = '  '
+    p = make_provider('deepseek', 'k', 'deepseek-flash', 'https://api.deepseek.com')
+    with pytest.raises(ReadError, match='empty answer'):
+        p.complete('SYS', _png_bytes((80, 60)), 'image/png', 'read it', {'type': 'object'})

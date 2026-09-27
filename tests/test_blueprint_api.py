@@ -288,3 +288,12 @@ def test_openai_model_filter():
             'gpt-4o-mini-tts', 'dall-e-3', 'gpt-image-1', 'gpt-5-codex', 'omni-moderation-latest']
     ok = lambda m: m.startswith(_OPENAI_VISION_PREFIXES) and not any(w in m for w in _OPENAI_SKIP)
     assert all(ok(m) for m in keep) and not any(ok(m) for m in drop)
+
+
+def test_read_timeout_per_provider(monkeypatch):
+    from backend import blueprint as bp
+    monkeypatch.setattr(bp, '_READ_TIMEOUT_ENV', None)
+    assert bp.read_timeout('deepseek') == 1200 and bp.read_timeout('anthropic') == bp.READ_TIMEOUT_S
+    monkeypatch.setattr(bp, '_READ_TIMEOUT_ENV', '90')
+    monkeypatch.setattr(bp, 'READ_TIMEOUT_S', 90.0)
+    assert bp.read_timeout('deepseek') == 90 and bp.read_timeout('openai') == 90
