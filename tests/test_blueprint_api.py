@@ -297,3 +297,19 @@ def test_read_timeout_per_provider(monkeypatch):
     monkeypatch.setattr(bp, '_READ_TIMEOUT_ENV', '90')
     monkeypatch.setattr(bp, 'READ_TIMEOUT_S', 90.0)
     assert bp.read_timeout('deepseek') == 90 and bp.read_timeout('openai') == 90
+
+
+def test_deepseek_model_list_is_flash_only(monkeypatch):
+    openai = pytest.importorskip('openai')
+    from types import SimpleNamespace as NS
+    from backend import blueprint as bp
+
+    class Fake:
+        def __init__(self, **kw):
+            self.models = self
+
+        def list(self):
+            return [NS(id='deepseek-v4-pro', created=0), NS(id='deepseek-flash', created=0)]
+    monkeypatch.setattr(openai, 'OpenAI', Fake)
+    assert [m['id'] for m in bp.list_models('deepseek', 'k')] == ['deepseek-flash']
+    assert len(bp.list_models('custom', 'k', 'http://localhost:11434/v1')) == 2

@@ -149,11 +149,10 @@ def fake_openai(monkeypatch):
     return _FakeOpenAI
 
 
-@pytest.mark.parametrize('model', ['deepseek-flash', 'deepseek-v4-pro'])
 @pytest.mark.parametrize('effort,sent', [('low', 'low'), ('medium', 'high'), ('high', 'max')])
-def test_deepseek_thinking_and_json(fake_openai, model, effort, sent):
+def test_deepseek_thinking_and_json(fake_openai, effort, sent):
     from stl_to_solid.blueprint.providers import DEEPSEEK_MAX_TOKENS
-    p = make_provider('deepseek', 'k', model, 'https://api.deepseek.com')
+    p = make_provider('deepseek', 'k', 'deepseek-flash', 'https://api.deepseek.com')
     out, _, _ = p.complete('SYS', _png_bytes((80, 60)), 'image/png', 'read it', {'type': 'object'},
                            effort=effort)
     assert out == '{"ok": true}'
@@ -166,6 +165,13 @@ def test_deepseek_thinking_and_json(fake_openai, model, effort, sent):
     assert system.startswith('SYS') and 'json' in system and '{"type":"object"}' in system
     image = req['messages'][1]['content'][0]['image_url']
     assert image['detail'] == 'original' and image['url'].startswith('data:image/png;base64,')
+
+
+def test_deepseek_pro_is_refused_before_any_call(fake_openai):
+    p = make_provider('deepseek', 'k', 'deepseek-v4-pro', 'https://api.deepseek.com')
+    with pytest.raises(ReadError, match='does not take images') as e:
+        p.complete('SYS', _png_bytes((80, 60)), 'image/png', 'read it', {'type': 'object'})
+    assert e.value.kind == 'model' and fake_openai.requests == []
 
 
 def test_deepseek_other_model_gets_no_thinking(fake_openai):

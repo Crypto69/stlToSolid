@@ -181,9 +181,9 @@ storage and sent with each read as a header; the server uses it for
 that one call and never writes it to disk or a log. With no key in the
 browser the server's own `STLTOSOLID_<PROVIDER>_API_KEY` is used when
 set — an opt-in for a private install, since anyone who can reach the
-app could spend it. DeepSeek: use `deepseek-flash` (the default), which
-reads images; `deepseek-v4-pro` takes no images. Both get thinking
-switched on explicitly and JSON mode (`json_object`, the schema in the
+app could spend it. DeepSeek: only `deepseek-flash` reads images, so it
+is the only DeepSeek model offered (`deepseek-v4-pro` takes none and is
+refused). It gets thinking switched on explicitly and JSON mode (`json_object`, the schema in the
 prompt, since DeepSeek has no `json_schema`); Effort low / medium / high
 maps to DeepSeek's low / high / max, and the image goes at detail
 `original` (full resolution). The drawing is sent to the provider

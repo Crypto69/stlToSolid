@@ -34,9 +34,8 @@ PRESETS = {
     'deepseek': {'label': 'DeepSeek', 'default_model': 'deepseek-flash', 'base_url': 'https://api.deepseek.com',
                  'env': 'STLTOSOLID_DEEPSEEK_API_KEY', 'sdk': 'openai', 'needs_key': True,
                  'timeout': 1200,
-                 'note': 'Use deepseek-flash: it reads images. deepseek-v4-pro does not take images, '
-                         'so it cannot read a drawing. Thinking is switched on; Effort high asks for '
-                         "DeepSeek's max."},
+                 'note': "Only deepseek-flash reads images, so it is the one offered. Thinking is "
+                         "switched on; Effort high asks for DeepSeek's max (a read takes about 6–7 min)."},
     'custom': {'label': 'Custom (OpenAI-compatible URL)', 'default_model': '', 'base_url': '',
                'env': 'STLTOSOLID_CUSTOM_API_KEY', 'sdk': 'openai', 'needs_key': False,
                'note': 'Any OpenAI-compatible server: base URL and model are yours to type. Ollama '
@@ -119,9 +118,10 @@ _OPENAI_SKIP = ('audio', 'realtime', 'transcribe', 'tts', 'search', 'image', 'em
 def list_models(provider, api_key, base_url=None, timeout=30.0):
     """[{'id', 'label', 'created'}], newest first, for the panel's dropdown:
     Anthropic filtered to models that take images (the API says so); an
-    OpenAI-compatible server filtered by family names for OpenAI itself and
-    left whole for DeepSeek / a custom server (they say nothing about
-    images). Raises ReadError with a sentence."""
+    OpenAI-compatible server filtered by family names for OpenAI itself,
+    to the Flash models for DeepSeek (deepseek-v4-pro takes no images), and
+    left whole for a custom server (it says nothing about images). Raises
+    ReadError with a sentence."""
     from stl_to_solid.blueprint.providers import ReadError, _short
     preset = PRESETS[provider]
     url = (base_url or '').strip() or preset['base_url'] or None
@@ -165,6 +165,8 @@ def list_models(provider, api_key, base_url=None, timeout=30.0):
         if provider == 'openai':
             if not mid.startswith(_OPENAI_VISION_PREFIXES) or any(w in mid for w in _OPENAI_SKIP):
                 continue
+        if provider == 'deepseek' and 'flash' not in mid.lower():
+            continue
         out.append({'id': mid, 'label': mid, 'created': int(getattr(m, 'created', 0) or 0)})
     # a dated snapshot ("gpt-5.5-2026-04-23") next to its undated alias is noise
     import re

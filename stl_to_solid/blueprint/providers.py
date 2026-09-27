@@ -204,9 +204,9 @@ class OpenAICompatibleProvider(Provider):
 class DeepSeekProvider(OpenAICompatibleProvider):
     """DeepSeek's hosted API (api-docs.deepseek.com). JSON mode is
     json_object only (no json_schema), so the schema goes into the system
-    prompt, which must also say "json". deepseek-flash and deepseek-v4-pro
-    get thinking switched on explicitly (it is their default, but the
-    request should not depend on that), with DeepSeek's effort scale
+    prompt, which must also say "json". Only deepseek-flash takes images
+    (deepseek-v4-pro is refused before any call); it gets thinking switched
+    on explicitly (its default, but the request should not depend on that), with DeepSeek's effort scale
     low / high / max: the panel's medium has no match and rounds up, and
     its high asks for max. max_tokens is set, so thinking plus a long
     recipe is not cut off at a server default. The image goes at detail
@@ -215,8 +215,13 @@ class DeepSeekProvider(OpenAICompatibleProvider):
     EFFORT = {'low': 'low', 'medium': 'high', 'high': 'max'}
 
     def _thinking_model(self):
-        m = (self.model or '').lower()
-        return 'flash' in m or 'pro' in m
+        return 'flash' in (self.model or '').lower()
+
+    def complete(self, system, image_bytes, media_type, text, schema, history=(), effort='high'):
+        if 'pro' in (self.model or '').lower().split('-'):
+            raise ReadError(f'{self.model} does not take images, so it cannot read a drawing. '
+                            'Pick deepseek-flash.', 'model')
+        return super().complete(system, image_bytes, media_type, text, schema, history, effort)
 
     def _system(self, system, schema):
         return (system + '\n\nAnswer with one json object and nothing else: the recipe, '
