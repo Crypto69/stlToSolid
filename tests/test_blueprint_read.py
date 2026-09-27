@@ -118,7 +118,9 @@ def test_make_provider():
     assert make_provider('anthropic', 'k', 'claude-opus-5').name == 'anthropic'
     p = make_provider('deepseek', 'k', 'deepseek-flash', 'https://api.deepseek.com')
     assert p.name == 'deepseek' and p.base_url == 'https://api.deepseek.com'
-    assert make_provider('custom', 'k', 'llava', 'http://localhost:11434/v1').name == 'openai'
+    c = make_provider('custom', 'k', 'llava', 'http://localhost:11434/v1')
+    assert c.name == 'openai-compatible' and c.base_url == 'http://localhost:11434/v1'
+    assert make_provider('openai', 'k', 'gpt-5.5', 'http://ignored').base_url is None
     with pytest.raises(ReadError):
         make_provider('gemini', 'k', 'x')
 

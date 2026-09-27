@@ -176,7 +176,7 @@ const readLabel = computed(() => {
           <option value="high">high</option>
         </select>
       </div>
-      <div v-if="store.provider === 'custom'" class="row">
+      <div v-if="store.customUrl" class="row">
         <label for="bp_url">Base URL</label>
         <input
           id="bp_url" type="text" class="num wide" v-model="urlDraft" spellcheck="false" autocomplete="off"

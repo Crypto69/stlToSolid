@@ -445,19 +445,28 @@ def blueprint_config():
     return bp.config()
 
 
+def _provider_spec(provider):
+    """The registered provider, or a 422 naming the ones there are."""
+    spec = bp.spec(provider)
+    if spec is None:
+        raise HTTPException(422, f'Unknown provider {provider!r}; the providers are '
+                                 + ', '.join(bp.PROVIDERS) + '.')
+    return spec
+
+
 @app.get('/api/blueprints/models')
-async def blueprint_models(provider: Literal['anthropic', 'openai', 'deepseek', 'custom'] = 'anthropic',
+async def blueprint_models(provider: str = 'anthropic',
                            base_url: Optional[str] = None,
                            x_api_key: Optional[str] = Header(None, alias='X-Api-Key')):
-    """The models the given key can use with this provider, newest first,
-    for the panel's dropdown (Anthropic: only ones that take images). The
-    key travels in the header for this one call, as for /read."""
-    preset = bp.PRESETS[provider]
+    """The models the given key can use with this provider that take
+    images, newest first, for the panel's dropdown. The key travels in the
+    header for this one call, as for /read."""
+    preset = _provider_spec(provider)
     key = bp.resolve_key(provider, x_api_key)
-    if not key and preset['needs_key']:
-        raise HTTPException(400, bp.NO_KEY_MESSAGE.format(label=preset['label'], env=preset['env']))
-    if provider == 'custom' and not (base_url or '').strip():
-        raise HTTPException(400, 'The custom provider needs a base URL to list its models.')
+    if not key and preset.needs_key:
+        raise HTTPException(400, bp.no_key_message(provider))
+    if preset.custom_url and not (base_url or '').strip():
+        raise HTTPException(400, f'{preset.label} needs a base URL to list its models.')
     missing = bp.sdk_available(provider)
     if missing:
         raise HTTPException(503, missing + '.')
@@ -466,7 +475,7 @@ async def blueprint_models(provider: Literal['anthropic', 'openai', 'deepseek', 
     except Exception as e:
         raise HTTPException(400 if getattr(e, 'kind', '') == 'key' else 502,
                             f'Could not list models: {describe(e)}')
-    return {'provider': provider, 'models': models, 'default': preset['default_model']}
+    return {'provider': provider, 'models': models, 'default': preset.default_model}
 
 
 @app.post('/api/blueprints')
@@ -518,7 +527,7 @@ def blueprint_drawing(job_id: str):
 
 
 class ReadBody(BaseModel):
-    provider: Literal['anthropic', 'openai', 'deepseek', 'custom'] = 'anthropic'
+    provider: str = Field('anthropic', max_length=50)
     model: Optional[str] = Field(None, max_length=200)
     base_url: Optional[str] = Field(None, max_length=500)
     hints: str = Field('', max_length=2000, description='notes for the reader, e.g. which view is which')
@@ -534,14 +543,14 @@ def blueprint_read(job_id: str, body: ReadBody,
     job, src = _drawing_path(job_id)
     if job['status'] in ('reading', 'queued', 'running'):
         raise HTTPException(409, 'This drawing is already being read or built; wait or cancel first.')
-    preset = bp.PRESETS[body.provider]
+    preset = _provider_spec(body.provider)
     key = bp.resolve_key(body.provider, x_api_key)
-    if not key and preset['needs_key']:
-        raise HTTPException(400, bp.NO_KEY_MESSAGE.format(label=preset['label'], env=preset['env']))
-    model = (body.model or '').strip() or preset['default_model']
-    base_url = (body.base_url or '').strip() or preset['base_url'] or None
-    if body.provider == 'custom' and not (model and base_url):
-        raise HTTPException(400, 'The custom provider needs both a base URL and a model name.')
+    if not key and preset.needs_key:
+        raise HTTPException(400, bp.no_key_message(body.provider))
+    model = (body.model or '').strip() or preset.default_model
+    base_url = ((body.base_url or '').strip() or None) if preset.custom_url else preset.base_url
+    if preset.custom_url and not (model and base_url):
+        raise HTTPException(400, f'{preset.label} needs both a base URL and a model name.')
     missing = bp.sdk_available(body.provider)
     if missing:
         raise HTTPException(503, missing + '.')

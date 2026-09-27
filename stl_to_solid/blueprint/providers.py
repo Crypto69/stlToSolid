@@ -1,18 +1,31 @@
-"""The vision providers behind Blueprint, one small adapter each:
-Anthropic through its SDK (structured output by JSON schema), and every
-OpenAI-compatible chat endpoint through the openai SDK (OpenAI itself,
-Ollama, OpenRouter... by base URL), which tries strict JSON schema, then
-json_object, then plain text, since compatible servers differ in what
-they accept. DeepSeek is its own small variant of that one: json_object
-with the schema in the prompt, and thinking switched on.
+"""The vision providers behind Blueprint: one adapter class per API
+style, and a registry of the providers the panel offers.
 
-Each adapter's complete() takes the same neutral request and returns
-(text, usage, model). Failures come back as ReadError with a sentence
-for the user; the key is used for the one client and never repeated in
-any message.
+Adapters (subclasses of Provider) turn the one neutral request into an
+API call: complete() takes (system, image, text, schema, history,
+effort) and returns (text, usage, model); list_models() returns the
+models that take images. AnthropicProvider uses its SDK (structured
+output by JSON schema). OpenAICompatibleProvider covers any
+OpenAI-style chat endpoint (Ollama, OpenRouter... by base URL) and tries
+strict JSON schema, then json_object, then plain text, since compatible
+servers differ in what they accept; OpenAIProvider and DeepSeekProvider
+are small variants of it that change only hooks (the image-model
+filter; DeepSeek's json_object with the schema in the prompt, thinking,
+effort scale and image detail).
+
+The registry (PROVIDERS, filled by register()) holds one ProviderSpec
+per provider: its label, adapter, default model and endpoint.
+make_provider() is the factory. A new OpenAI-compatible provider is one
+register() call; a new API style is an adapter class plus that call.
+
+Failures come back as ReadError with a sentence for the user; the key
+is used for the one client and never repeated in any message. This is
+the only module that imports the provider SDKs, lazily, inside methods.
 """
 import base64
 import json
+import re
+from dataclasses import dataclass
 
 
 class ReadError(RuntimeError):
@@ -34,6 +47,7 @@ DEEPSEEK_MAX_TOKENS = 256000
 
 class Provider:
     name = 'base'
+    sdk = None          # the pip package the adapter imports
 
     def __init__(self, api_key, model, base_url=None, timeout=300.0):
         self.api_key = api_key
@@ -49,12 +63,40 @@ class Provider:
         (text, {'input_tokens', 'output_tokens'}, model)."""
         raise NotImplementedError
 
+    def list_models(self):
+        """[{'id', 'label', 'created'}] the key can use that take images,
+        newest first, for the panel's dropdown. Raises ReadError."""
+        raise NotImplementedError
+
 
 EFFORTS = ('low', 'medium', 'high')
 
 
 class AnthropicProvider(Provider):
     name = 'anthropic'
+    sdk = 'anthropic'
+
+    def list_models(self):
+        """Filtered to models that take images (the API says so)."""
+        import anthropic
+        try:
+            client = anthropic.Anthropic(api_key=self.api_key, timeout=self.timeout, max_retries=1)
+            out = []
+            for m in client.models.list():
+                caps = getattr(m, 'capabilities', None)
+                if not getattr(getattr(caps, 'image_input', None), 'supported', True):
+                    continue
+                created = getattr(m, 'created_at', None)
+                out.append({'id': m.id, 'label': getattr(m, 'display_name', None) or m.id,
+                            'created': created.isoformat() if hasattr(created, 'isoformat') else str(created or '')})
+        except anthropic.AuthenticationError:
+            raise ReadError('Anthropic refused the API key. Check the key in the Blueprint panel.', 'key')
+        except anthropic.APIStatusError as e:
+            raise ReadError(f'Anthropic answered {e.status_code}: {_short(e.message)}', 'api')
+        except anthropic.APIConnectionError:
+            raise ReadError('Could not reach the Anthropic API from the server (network or timeout).', 'network')
+        out.sort(key=lambda x: x['created'], reverse=True)
+        return out
 
     def complete(self, system, image_bytes, media_type, text, schema, history=(), effort='high'):
         import anthropic
@@ -105,7 +147,34 @@ class AnthropicProvider(Provider):
 
 
 class OpenAICompatibleProvider(Provider):
-    name = 'openai'
+    """Any OpenAI-style chat endpoint; the subclasses below change hooks only."""
+    name = 'openai-compatible'
+    sdk = 'openai'
+
+    def _keep_model(self, model_id):
+        """Whether a listed model belongs in the dropdown. A compatible server
+        only gives ids and says nothing about images, so all of them."""
+        return True
+
+    def list_models(self):
+        import openai
+        try:
+            client = openai.OpenAI(api_key=self.api_key or 'none', base_url=self.base_url,
+                                   timeout=self.timeout, max_retries=1)
+            models = list(client.models.list())
+        except openai.AuthenticationError:
+            raise ReadError(f'{_where(self)} refused the API key. Check the key in the Blueprint panel.', 'key')
+        except openai.APIStatusError as e:
+            raise ReadError(f'{_where(self)} answered {e.status_code}: {_short(_msg(e))}', 'api')
+        except openai.APIConnectionError:
+            raise ReadError(f'Could not reach {_where(self)} from the server (network or timeout).', 'network')
+        out = [{'id': m.id, 'label': m.id, 'created': int(getattr(m, 'created', 0) or 0)}
+               for m in models if getattr(m, 'id', None) and self._keep_model(m.id)]
+        # a dated snapshot ("gpt-5.5-2026-04-23") next to its undated alias is noise
+        ids = {m['id'] for m in out}
+        out = [m for m in out if not (_DATED.search(m['id']) and _DATED.sub('', m['id']) in ids)]
+        out.sort(key=lambda x: (x['created'], x['id']), reverse=True)
+        return out
 
     def _system(self, system, schema):
         return system
@@ -201,12 +270,29 @@ class OpenAICompatibleProvider(Provider):
         return out, usage, getattr(resp, 'model', None) or self.model
 
 
+_DATED = re.compile(r'-\d{4}-\d{2}-\d{2}$')
+# OpenAI only gives model ids; these are the families that take images in a
+# chat completion, and the words that mark models that do not
+OPENAI_VISION_PREFIXES = ('gpt-4o', 'gpt-4.1', 'gpt-4.5', 'gpt-5', 'o1', 'o3', 'o4', 'chatgpt-')
+OPENAI_SKIP = ('audio', 'realtime', 'transcribe', 'tts', 'search', 'image', 'embedding', 'moderation',
+               'codex', 'computer-use', 'instruct', 'preview-2024', 'whisper', 'dall-e', 'babbage', 'davinci')
+
+
+class OpenAIProvider(OpenAICompatibleProvider):
+    """OpenAI itself: the dropdown keeps the families that take images."""
+    name = 'openai'
+
+    def _keep_model(self, model_id):
+        return model_id.startswith(OPENAI_VISION_PREFIXES) and not any(w in model_id for w in OPENAI_SKIP)
+
+
 class DeepSeekProvider(OpenAICompatibleProvider):
     """DeepSeek's hosted API (api-docs.deepseek.com). JSON mode is
     json_object only (no json_schema), so the schema goes into the system
-    prompt, which must also say "json". Only deepseek-flash takes images
-    (deepseek-v4-pro is refused before any call); it gets thinking switched
-    on explicitly (its default, but the request should not depend on that), with DeepSeek's effort scale
+    prompt, which must also say "json". Only deepseek-flash takes images,
+    so the dropdown keeps only Flash and deepseek-v4-pro is refused before
+    any call. Flash gets thinking switched on explicitly (its default, but
+    the request should not depend on that), with DeepSeek's effort scale
     low / high / max: the panel's medium has no match and rounds up, and
     its high asks for max. max_tokens is set, so thinking plus a long
     recipe is not cut off at a server default. The image goes at detail
@@ -216,6 +302,9 @@ class DeepSeekProvider(OpenAICompatibleProvider):
 
     def _thinking_model(self):
         return 'flash' in (self.model or '').lower()
+
+    def _keep_model(self, model_id):
+        return 'flash' in model_id.lower()
 
     def complete(self, system, image_bytes, media_type, text, schema, history=(), effort='high'):
         if 'pro' in (self.model or '').lower().split('-'):
@@ -261,11 +350,53 @@ def _where(p):
     return f'the server at {p.base_url}' if p.base_url else 'OpenAI'
 
 
+# ---------------------------------------------------------------- registry
+
+@dataclass(frozen=True)
+class ProviderSpec:
+    """One provider the panel offers."""
+    key: str                    # id in requests, and STLTOSOLID_<KEY>_API_KEY on the server
+    label: str
+    adapter: type               # a Provider subclass
+    default_model: str
+    base_url: str = None        # None: the SDK's default endpoint
+    needs_key: bool = True
+    custom_url: bool = False    # the user types the base URL (and the model)
+    timeout: float = 300.0      # seconds one read may take
+    note: str = ''
+
+
+PROVIDERS = {}                  # key -> ProviderSpec, in the panel's order
+
+
+def register(spec):
+    PROVIDERS[spec.key] = spec
+    return spec
+
+
+def get_spec(provider):
+    try:
+        return PROVIDERS[provider]
+    except KeyError:
+        raise ReadError(f'unknown provider {provider!r}', 'api') from None
+
+
 def make_provider(provider, api_key, model, base_url=None, timeout=300.0):
-    if provider == 'anthropic':
-        return AnthropicProvider(api_key, model, None, timeout)
-    if provider == 'deepseek':
-        return DeepSeekProvider(api_key, model, base_url, timeout)
-    if provider in ('openai', 'custom'):
-        return OpenAICompatibleProvider(api_key, model, base_url, timeout)
-    raise ReadError(f'unknown provider {provider!r}', 'api')
+    """The adapter for a registered provider. Only a custom_url provider
+    takes the request's base URL; the others always use their own."""
+    spec = get_spec(provider)
+    url = ((base_url or '').strip() or None) if spec.custom_url else spec.base_url
+    return spec.adapter(api_key, model, url, timeout)
+
+
+register(ProviderSpec('anthropic', 'Anthropic (Claude)', AnthropicProvider, 'claude-opus-5'))
+register(ProviderSpec('openai', 'OpenAI', OpenAIProvider, 'gpt-5.5',
+                      note='Model names change; edit the model if the API says it does not exist.'))
+register(ProviderSpec('deepseek', 'DeepSeek', DeepSeekProvider, 'deepseek-flash',
+                      base_url='https://api.deepseek.com', timeout=1200,
+                      note='Only deepseek-flash reads images, so it is the one offered. Thinking is '
+                           "switched on; Effort high asks for DeepSeek's max (a read takes about 6–7 min)."))
+register(ProviderSpec('custom', 'Custom (OpenAI-compatible URL)', OpenAICompatibleProvider, '',
+                      needs_key=False, custom_url=True,
+                      note='Any OpenAI-compatible server: base URL and model are yours to type. Ollama '
+                           '(http://localhost:11434/v1) with a vision model keeps the drawing local.'))

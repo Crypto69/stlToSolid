@@ -186,7 +186,12 @@ is the only DeepSeek model offered (`deepseek-v4-pro` takes none and is
 refused). It gets thinking switched on explicitly and JSON mode (`json_object`, the schema in the
 prompt, since DeepSeek has no `json_schema`); Effort low / medium / high
 maps to DeepSeek's low / high / max, and the image goes at detail
-`original` (full resolution). The drawing is sent to the provider
+`original` (full resolution). Adding a provider is one `register()`
+call in `stl_to_solid/blueprint/providers.py` (label, adapter, default
+model, endpoint); an OpenAI-compatible one reuses its adapter, and a new
+API style is one `Provider` subclass (`complete` + `list_models`). The
+server key is then `STLTOSOLID_<KEY>_API_KEY` and the panel lists it
+with no frontend change. The drawing is sent to the provider
 you pick and nowhere else.
 
 Routes: `POST /api/blueprints` (the image; .jpg, .png or .webp, up to
