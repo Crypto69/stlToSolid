@@ -272,6 +272,8 @@ def test_models_route(tmp_path, monkeypatch):
         assert calls[-1] == ('anthropic', 'sk-x', None)
         r = c.get('/api/blueprints/models?provider=custom', headers={'X-Api-Key': 'k'})
         assert r.status_code == 400 and 'base URL' in r.json()['detail']
+        r = c.get('/api/blueprints/models?provider=gemini', headers={'X-Api-Key': 'k'})
+        assert r.status_code == 422 and 'anthropic, openai, deepseek, custom' in r.json()['detail']
         from stl_to_solid.blueprint.providers import ReadError
 
         def refused(provider, key, base_url=None, timeout=30.0):
@@ -282,11 +284,11 @@ def test_models_route(tmp_path, monkeypatch):
 
 
 def test_openai_model_filter():
-    from backend.blueprint import _OPENAI_VISION_PREFIXES, _OPENAI_SKIP
+    from stl_to_solid.blueprint.providers import OpenAIProvider
     keep = ['gpt-5', 'gpt-5-mini', 'gpt-4o', 'gpt-4.1', 'o3', 'chatgpt-4o-latest']
     drop = ['gpt-4o-audio-preview', 'gpt-4o-realtime-preview', 'text-embedding-3-large', 'whisper-1',
             'gpt-4o-mini-tts', 'dall-e-3', 'gpt-image-1', 'gpt-5-codex', 'omni-moderation-latest']
-    ok = lambda m: m.startswith(_OPENAI_VISION_PREFIXES) and not any(w in m for w in _OPENAI_SKIP)
+    ok = OpenAIProvider('k', 'm')._keep_model
     assert all(ok(m) for m in keep) and not any(ok(m) for m in drop)
 
 
@@ -313,3 +315,25 @@ def test_deepseek_model_list_is_flash_only(monkeypatch):
     monkeypatch.setattr(openai, 'OpenAI', Fake)
     assert [m['id'] for m in bp.list_models('deepseek', 'k')] == ['deepseek-flash']
     assert len(bp.list_models('custom', 'k', 'http://localhost:11434/v1')) == 2
+
+
+def test_a_new_provider_is_one_register_call(tmp_path, monkeypatch):
+    """The registry is the only list of providers: one register() puts a
+    provider in the panel's config, the key lookup, the timeout and the
+    factory, and an unknown one is refused by the read route."""
+    from stl_to_solid.blueprint import providers as P
+    from backend import blueprint as bp
+    monkeypatch.setitem(P.PROVIDERS, 'acme', P.ProviderSpec(
+        'acme', 'Acme Vision', P.OpenAICompatibleProvider, 'acme-eye-1',
+        base_url='https://api.acme.test/v1', timeout=77))
+    monkeypatch.setenv('STLTOSOLID_ACME_API_KEY', 'sk-acme')
+    monkeypatch.setattr(bp, '_READ_TIMEOUT_ENV', None)
+    entry = next(p for p in bp.config()['providers'] if p['key'] == 'acme')
+    assert entry['label'] == 'Acme Vision' and entry['server_key'] is True
+    assert entry['env'] == 'STLTOSOLID_ACME_API_KEY' and entry['custom_url'] is False
+    assert bp.read_timeout('acme') == 77 and bp.resolve_key('acme', None) == 'sk-acme'
+    a = P.make_provider('acme', 'k', 'acme-eye-1', 'https://ignored.test')
+    assert isinstance(a, P.OpenAICompatibleProvider) and a.base_url == 'https://api.acme.test/v1'
+    with _client(tmp_path, monkeypatch) as c:
+        cfg = c.get('/api/blueprints/config').json()
+        assert [p['key'] for p in cfg['providers']][-1] == 'acme'

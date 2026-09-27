@@ -11,6 +11,8 @@ shared NAS anyone on the LAN could spend it).
 """
 import os
 
+from stl_to_solid.blueprint import providers as _providers
+
 IMAGE_EXTS = ('jpg', 'jpeg', 'png', 'webp')
 IMAGE_MEDIA = {'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png', 'webp': 'image/webp'}
 MAX_IMAGE = int(os.environ.get('STLTOSOLID_MAX_IMAGE', 20 * 1024 * 1024))
@@ -19,45 +21,34 @@ MAX_IMAGE = int(os.environ.get('STLTOSOLID_MAX_IMAGE', 20 * 1024 * 1024))
 _READ_TIMEOUT_ENV = os.environ.get('STLTOSOLID_BLUEPRINT_TIMEOUT')
 READ_TIMEOUT_S = float(_READ_TIMEOUT_ENV or 300)
 
-# The vision providers the panel offers. `env` is the server-side key's
-# variable; `base_url` None means the SDK's default endpoint; 'custom'
-# takes both the URL and the model from the request (an OpenAI-compatible
-# server such as Ollama or OpenRouter — Ollama with a vision model keeps
-# the drawing on the user's own machine).
-PRESETS = {
-    'anthropic': {'label': 'Anthropic (Claude)', 'default_model': 'claude-opus-5', 'base_url': None,
-                  'env': 'STLTOSOLID_ANTHROPIC_API_KEY', 'sdk': 'anthropic', 'needs_key': True,
-                  'note': ''},
-    'openai': {'label': 'OpenAI', 'default_model': 'gpt-5.5', 'base_url': None,
-               'env': 'STLTOSOLID_OPENAI_API_KEY', 'sdk': 'openai', 'needs_key': True,
-               'note': 'Model names change; edit the model if the API says it does not exist.'},
-    'deepseek': {'label': 'DeepSeek', 'default_model': 'deepseek-flash', 'base_url': 'https://api.deepseek.com',
-                 'env': 'STLTOSOLID_DEEPSEEK_API_KEY', 'sdk': 'openai', 'needs_key': True,
-                 'timeout': 1200,
-                 'note': "Only deepseek-flash reads images, so it is the one offered. Thinking is "
-                         "switched on; Effort high asks for DeepSeek's max (a read takes about 6–7 min)."},
-    'custom': {'label': 'Custom (OpenAI-compatible URL)', 'default_model': '', 'base_url': '',
-               'env': 'STLTOSOLID_CUSTOM_API_KEY', 'sdk': 'openai', 'needs_key': False,
-               'note': 'Any OpenAI-compatible server: base URL and model are yours to type. Ollama '
-                       '(http://localhost:11434/v1) with a vision model keeps the drawing local.'},
-}
-PROVIDER_ORDER = ('anthropic', 'openai', 'deepseek', 'custom')
+# The providers themselves (label, adapter, default model, endpoint) are
+# the registry in stl_to_solid.blueprint.providers; this module adds the
+# server's side of them: keys from the environment, timeouts, the config.
+PROVIDERS = _providers.PROVIDERS
 
 NO_KEY_MESSAGE = ('No API key for {label}: paste one in the Blueprint panel (it stays in your '
                   'browser), or set {env} on the server.')
 
 
+def spec(provider):
+    """The ProviderSpec, or None for a name nobody registered."""
+    return PROVIDERS.get(provider)
+
+
+def env_var(provider):
+    return f'STLTOSOLID_{provider.upper()}_API_KEY'
+
+
 def server_key(provider):
-    p = PRESETS.get(provider)
-    if not p:
+    if provider not in PROVIDERS:
         return None
-    return os.environ.get(p['env']) or None
+    return os.environ.get(env_var(provider)) or None
 
 
 def read_timeout(provider):
     if _READ_TIMEOUT_ENV:
         return READ_TIMEOUT_S
-    return float(PRESETS[provider].get('timeout', READ_TIMEOUT_S))
+    return float(PROVIDERS[provider].timeout)
 
 
 def resolve_key(provider, header_key):
@@ -68,21 +59,25 @@ def resolve_key(provider, header_key):
     return server_key(provider)
 
 
+def no_key_message(provider):
+    return NO_KEY_MESSAGE.format(label=PROVIDERS[provider].label, env=env_var(provider))
+
+
 def config():
     """What the panel needs to offer the providers."""
     return {
         'providers': [{
-            'key': k, 'label': p['label'], 'default_model': p['default_model'],
-            'base_url': p['base_url'], 'server_key': server_key(k) is not None,
-            'needs_key': p['needs_key'], 'note': p['note'], 'env': p['env'],
-        } for k, p in ((k, PRESETS[k]) for k in PROVIDER_ORDER)],
+            'key': k, 'label': p.label, 'default_model': p.default_model,
+            'base_url': p.base_url, 'server_key': server_key(k) is not None,
+            'needs_key': p.needs_key, 'custom_url': p.custom_url, 'note': p.note, 'env': env_var(k),
+        } for k, p in PROVIDERS.items()],
         'max_image_mb': MAX_IMAGE // (1 << 20),
     }
 
 
 def sdk_available(provider):
     """None when the provider's SDK imports, else the pip hint."""
-    sdk = PRESETS[provider]['sdk']
+    sdk = PROVIDERS[provider].adapter.sdk
     try:
         __import__(sdk)
     except ImportError:
@@ -108,70 +103,8 @@ def verify_image(path):
     return w, h
 
 
-# OpenAI-compatible servers only give model ids; these are the families that
-# take images in a chat completion, and the words that mark models that do not
-_OPENAI_VISION_PREFIXES = ('gpt-4o', 'gpt-4.1', 'gpt-4.5', 'gpt-5', 'o1', 'o3', 'o4', 'chatgpt-')
-_OPENAI_SKIP = ('audio', 'realtime', 'transcribe', 'tts', 'search', 'image', 'embedding', 'moderation',
-                'codex', 'computer-use', 'instruct', 'preview-2024', 'whisper', 'dall-e', 'babbage', 'davinci')
-
-
 def list_models(provider, api_key, base_url=None, timeout=30.0):
-    """[{'id', 'label', 'created'}], newest first, for the panel's dropdown:
-    Anthropic filtered to models that take images (the API says so); an
-    OpenAI-compatible server filtered by family names for OpenAI itself,
-    to the Flash models for DeepSeek (deepseek-v4-pro takes no images), and
-    left whole for a custom server (it says nothing about images). Raises
-    ReadError with a sentence."""
-    from stl_to_solid.blueprint.providers import ReadError, _short
-    preset = PRESETS[provider]
-    url = (base_url or '').strip() or preset['base_url'] or None
-    if provider == 'anthropic':
-        import anthropic
-        try:
-            client = anthropic.Anthropic(api_key=api_key, timeout=timeout, max_retries=1)
-            out = []
-            for m in client.models.list():
-                caps = getattr(m, 'capabilities', None)
-                img = getattr(getattr(caps, 'image_input', None), 'supported', True)
-                if not img:
-                    continue
-                created = getattr(m, 'created_at', None)
-                out.append({'id': m.id, 'label': getattr(m, 'display_name', None) or m.id,
-                            'created': created.isoformat() if hasattr(created, 'isoformat') else str(created or '')})
-            out.sort(key=lambda x: x['created'], reverse=True)
-            return out
-        except anthropic.AuthenticationError:
-            raise ReadError('Anthropic refused the API key. Check the key in the Blueprint panel.', 'key')
-        except anthropic.APIStatusError as e:
-            raise ReadError(f'Anthropic answered {e.status_code}: {_short(e.message)}', 'api')
-        except anthropic.APIConnectionError:
-            raise ReadError('Could not reach the Anthropic API from the server (network or timeout).', 'network')
-    import openai
-    where = f'the server at {url}' if url else 'OpenAI'
-    try:
-        client = openai.OpenAI(api_key=api_key or 'none', base_url=url, timeout=timeout, max_retries=1)
-        models = list(client.models.list())
-    except openai.AuthenticationError:
-        raise ReadError(f'{where} refused the API key. Check the key in the Blueprint panel.', 'key')
-    except openai.APIStatusError as e:
-        raise ReadError(f'{where} answered {e.status_code}: {_short(getattr(e, "message", str(e)))}', 'api')
-    except openai.APIConnectionError:
-        raise ReadError(f'Could not reach {where} from the server (network or timeout).', 'network')
-    out = []
-    for m in models:
-        mid = getattr(m, 'id', None)
-        if not mid:
-            continue
-        if provider == 'openai':
-            if not mid.startswith(_OPENAI_VISION_PREFIXES) or any(w in mid for w in _OPENAI_SKIP):
-                continue
-        if provider == 'deepseek' and 'flash' not in mid.lower():
-            continue
-        out.append({'id': mid, 'label': mid, 'created': int(getattr(m, 'created', 0) or 0)})
-    # a dated snapshot ("gpt-5.5-2026-04-23") next to its undated alias is noise
-    import re
-    ids = {m['id'] for m in out}
-    out = [m for m in out if not (re.search(r'-\d{4}-\d{2}-\d{2}$', m['id'])
-                                 and re.sub(r'-\d{4}-\d{2}-\d{2}$', '', m['id']) in ids)]
-    out.sort(key=lambda x: (x['created'], x['id']), reverse=True)
-    return out
+    """[{'id', 'label', 'created'}], newest first, for the panel's
+    dropdown: the provider's adapter lists the models that take images.
+    Raises ReadError with a sentence."""
+    return _providers.make_provider(provider, api_key, '', base_url, timeout).list_models()

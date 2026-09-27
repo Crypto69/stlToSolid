@@ -39,12 +39,12 @@ def test_live_read_sg90(provider, tmp_path):
     if not os.path.exists(SAMPLE):
         pytest.skip('sample drawing missing')
     pytest.importorskip('anthropic' if provider == 'anthropic' else 'openai')
-    from backend.blueprint import PRESETS, read_timeout
+    from backend.blueprint import PROVIDERS, read_timeout
     from stl_to_solid.blueprint.read_drawing import read_drawing
     from stl_to_solid.blueprint.compile import compile_recipe
     with open(SAMPLE, 'rb') as f:
         img = f.read()
-    out = read_drawing(img, provider, key, model=PRESETS[provider]['default_model'],
+    out = read_drawing(img, provider, key, model=PROVIDERS[provider].default_model,
                        base_url=PROVIDERS[provider][2], timeout=read_timeout(provider))
     rec = out['recipe']
     print(f"\n[{provider}] {out['model']}: {out['usage']} in {out['seconds']} s, repaired={out['repaired']}")

@@ -192,12 +192,14 @@ export const useConvertStore = defineStore('convert', {
     readStatus: (s) => (s.status !== 'running' ? null : s.serverStatus === 'reading' ? 'reading' : 'building'),
     providerPreset: (s) => (s.blueprintConfig?.providers || []).find((p) => p.key === s.provider) || null,
     hasServerKey: (s) => !!s.providerPreset?.server_key,
+    // the provider takes a user-typed base URL (an OpenAI-compatible server)
+    customUrl: (s) => !!s.providerPreset?.custom_url,
     apiKey: (s) => s.apiKeys[s.provider] || '',
     modelName: (s) => (s.providerModel[s.provider] ?? s.providerPreset?.default_model ?? ''),
     canRead: (s) =>
       !!s.jobId && !!s.imageUrl && !s.busy && s.status !== 'uploading'
       && (!!s.apiKey || s.hasServerKey || s.providerPreset?.needs_key === false)
-      && (s.provider !== 'custom' || (!!s.providerBaseUrl && !!s.modelName)),
+      && (!s.customUrl || (!!s.providerBaseUrl && !!s.modelName)),
     // A file with one body needs no picker at all.
     hasBodyPicker: (s) => s.bodies.length > 1,
     selectedCount: (s) => (s.selected.length || s.bodies.length),
@@ -663,13 +665,13 @@ export const useConvertStore = defineStore('convert', {
       const preset = this.providerPreset
       if (!preset) return
       if (!this.apiKey && !this.hasServerKey && preset.needs_key !== false) return
-      if (p === 'custom' && !this.providerBaseUrl) return
+      if (this.customUrl && !this.providerBaseUrl) return
       this.modelsBusy = true
       this.modelsError = null
       try {
         const headers = this.apiKey ? { 'X-Api-Key': this.apiKey } : {}
         const q = new URLSearchParams({ provider: p })
-        if (p === 'custom') q.set('base_url', this.providerBaseUrl)
+        if (this.customUrl) q.set('base_url', this.providerBaseUrl)
         const res = await fetch(`/api/blueprints/models?${q}`, { headers })
         if (!res.ok) throw new Error(await errText(res))
         const d = await res.json()
@@ -737,7 +739,7 @@ export const useConvertStore = defineStore('convert', {
           method: 'POST', headers,
           body: JSON.stringify({
             provider: this.provider, model: this.modelName || null,
-            base_url: this.provider === 'custom' ? this.providerBaseUrl : null,
+            base_url: this.customUrl ? this.providerBaseUrl : null,
             hints: this.hints || '',
             effort: this.effort,
           }),
