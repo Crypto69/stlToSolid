@@ -94,8 +94,8 @@ async function download() {
     </p>
     <AxisSelect />
     <div v-if="store.sliceHalfExtent > 0" class="slice">
-      <PlaneSlider v-model="store.xrayFrom" id="xray_from" label="Start plane" />
-      <PlaneSlider v-model="store.xrayTo" id="xray_to" label="End plane" />
+      <PlaneSlider v-model="store.xrayFrom" id="xray_from" label="Start plane" pick-key="xrayFrom" />
+      <PlaneSlider v-model="store.xrayTo" id="xray_to" label="End plane" pick-key="xrayTo" />
       <div class="row">
         <label for="xray_step">
           Spacing

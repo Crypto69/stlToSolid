@@ -70,7 +70,7 @@ const sectionSummary = computed(() => summarise(store.section?.stats, store.slic
     </div>
     <AxisSelect />
     <div v-if="store.sliceHalfExtent > 0" class="slice">
-      <PlaneSlider v-model="store.sliceOffset" id="slice_offset" label="Single slice" />
+      <PlaneSlider v-model="store.sliceOffset" id="slice_offset" label="Single slice" pick-key="sliceOffset" />
       <p class="hint">
         Move the slider and the plane in the 3D view follows; the traced
         outline is drawn on it a moment later. This is Fusion's Create Mesh

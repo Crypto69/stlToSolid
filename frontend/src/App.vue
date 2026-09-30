@@ -221,7 +221,9 @@ const canConvert = computed(
           :hovered="store.hovered"
           :planes="store.viewPlanes"
           :sections="store.viewSections"
+          :plane-pick="!!store.planePick"
           @pick="store.isImageJob ? null : store.toggleBody($event)"
+          @plane-pick="store.pickPlane($event)"
           @hover="store.hovered = $event"
           @error="previewError = $event"
         />

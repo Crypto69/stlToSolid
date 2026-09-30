@@ -142,6 +142,11 @@ export const useConvertStore = defineStore('convert', {
     // thin walls of the next part put through the X-Ray
     xrayJoin: 2.5,
     xrayTrim: 0,
+    // a plane slider waiting for a face click in the 3D view: the store key
+    // it sets ('xrayFrom' | 'xrayTo' | 'sliceOffset'), or null; the note
+    // says where the last pick put that plane ({ key, text })
+    planePick: null,
+    planePickNote: null,
     // the part's exact side along one axis, from the server ({job, axis,
     // units, scale, mm}); bbox_mm is rounded to 0.01 mm, and a plane clamped
     // with the rounded half can land just outside the part and cut nothing
@@ -365,6 +370,7 @@ export const useConvertStore = defineStore('convert', {
           sliceOffset: 0, sliceOutline: false, section: null, sectionError: null,
           xrayFrom: 0, xrayTo: 0, xrayExtrude: false, xrayTraces: [], xrayTotal: 0,
           xrayError: null, xrayTraceMs: null, exactExtent: null,
+          planePick: null, planePickNote: null,
         })
         this.loadBodies()
       } catch (e) {
@@ -860,6 +866,27 @@ export const useConvertStore = defineStore('convert', {
       const lim = Math.max(0, h - XRAY_EDGE)
       this.xrayFrom = -lim
       this.xrayTo = lim
+    },
+
+    // A face was clicked while a plane slider waited for one: { offset (mm
+    // from centre), flat (a face across the axis, snapped exactly) }, or
+    // null to stop waiting (Esc).
+    pickPlane(hit) {
+      const key = this.planePick
+      this.planePick = null
+      if (!key || !hit) return
+      const h = this.sliceHalfExtent
+      // a flat face keeps its exact height (to the micron, so the 0.01 mm
+      // nudge survives); a clicked point is only as good as the click
+      const r = hit.flat ? 1000 : 100
+      const off = Math.round(Math.min(Math.max(hit.offset, -h), h) * r) / r
+      this[key] = off
+      this.planePickNote = {
+        key,
+        text: hit.flat
+          ? `on the flat face at ${off.toFixed(2)} mm (0.01 mm inside it, so the cut catches it)`
+          : `at ${off.toFixed(2)} mm, where you clicked (that face is not flat across the axis)`,
+      }
     },
 
     // Trace the slice at the current offset. Debounced by the caller (the
