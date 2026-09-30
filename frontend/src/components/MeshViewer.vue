@@ -28,10 +28,14 @@ const props = defineProps({
   // { polylines: [[[x,y,z]...]...] } in converted mm, drawn as bright
   // curves on the plane
   sections: { type: Array, default: () => [] },
+  // a plane slider is waiting for a face: the next click on the part emits
+  // 'plane-pick' instead of selecting a body
+  planePick: { type: Boolean, default: false },
 })
 // 'error': a sentence for the parent when the preview cannot be drawn
-// (the file itself is fine and still converts)
-const emit = defineEmits(['pick', 'hover', 'error'])
+// (the file itself is fine and still converts). 'plane-pick': { offset,
+// flat } for a face clicked while planePick is on, or null (Esc)
+const emit = defineEmits(['pick', 'hover', 'error', 'plane-pick'])
 
 const host = ref(null)
 // why there is no picture: WebGL missing, the file not parseable, ...
@@ -145,6 +149,7 @@ onMounted(() => {
   renderer.domElement.addEventListener('pointerup', onPointerUp)
   renderer.domElement.addEventListener('pointermove', onPointerMove)
   renderer.domElement.addEventListener('pointerleave', () => emit('hover', -1))
+  window.addEventListener('keydown', onKeyDown)
 
   resizeObs = new ResizeObserver(resize)
   resizeObs.observe(host.value)
@@ -234,19 +239,63 @@ function setGridVisible(on) {
   if (grid) grid.visible = on
 }
 
-// Which body is under the pointer, or -1. A hidden mesh is not pickable
-// (the Raycaster itself does not look at visibility).
-function bodyAt(ev) {
-  if (!mesh || !mesh.visible || !triToBody || !raycaster) return -1
+// The nearest hit on the part under the pointer, or null. A hidden mesh
+// is not pickable (the Raycaster itself does not look at visibility).
+function hitAt(ev) {
+  if (!mesh || !mesh.visible || !raycaster) return null
   const r = renderer.domElement.getBoundingClientRect()
   pointer.set(((ev.clientX - r.left) / r.width) * 2 - 1,
               -((ev.clientY - r.top) / r.height) * 2 + 1)
   raycaster.setFromCamera(pointer, camera)
   const hit = raycaster.intersectObject(mesh, false)[0]
-  if (!hit || hit.faceIndex == null) return -1
+  return hit && hit.faceIndex != null ? hit : null
+}
+
+// Which body is under the pointer, or -1.
+function bodyAt(ev) {
+  if (!triToBody) return -1
+  const hit = hitAt(ev)
+  if (!hit) return -1
   const b = triToBody[hit.faceIndex]
   return b == null ? -1 : b
 }
+
+// Where a plane across the slice axis goes for the face under the pointer:
+// { offset (converted mm from the box centre, as the sliders count),
+// flat }, or null. A triangle flat across the axis gives its own height,
+// moved 0.01 mm into the material (against its normal): the cutter counts
+// a vertex on the plane as above it, so a cut exactly on a face that
+// points down would miss the feature under it. Any other face gives the
+// height of the point clicked. All in the geometry's own frame, the one
+// localBox and drawPlanes use.
+const FLAT_COS = 0.999, INSIDE_MM = 0.01
+function facePickAt(ev) {
+  const k = sliceAxis.value
+  const hit = hitAt(ev)
+  if (!hit || !k || !localBox) return null
+  const pos = mesh.geometry.getAttribute('position')
+  const i = 'xyz'.indexOf(k)
+  const n = hit.face.normal[k]
+  const flat = Math.abs(n) > FLAT_COS
+  const at = flat
+    ? (pos.getComponent(hit.face.a, i) + pos.getComponent(hit.face.b, i) + pos.getComponent(hit.face.c, i)) / 3
+    : mesh.worldToLocal(hit.point.clone())[k]
+  const centre = new THREE.Vector3()
+  localBox.getCenter(centre)
+  let offset = (at - centre[k]) * (props.unitScale || 1)
+  if (flat) offset -= Math.sign(n) * INSIDE_MM
+  return { offset, flat }
+}
+
+function onKeyDown(ev) {
+  if (ev.key === 'Escape' && props.planePick) emit('plane-pick', null)
+}
+const idleCursor = () => (props.planePick ? 'crosshair'
+  : downAt && tool.value === 'pan' ? 'grabbing' : TOOL_CURSOR[tool.value])
+watch(() => props.planePick, (on) => {
+  if (on && props.hovered >= 0) emit('hover', -1)
+  if (renderer) renderer.domElement.style.cursor = idleCursor()
+})
 
 // A drag that orbits must not also toggle a body, so only a press and
 // release in nearly the same place counts as a click.
@@ -269,6 +318,11 @@ function onPointerUp(ev) {
   if (moved > 4) return
   const f = cubeFaceAt(ev)
   if (f >= 0) { snapToFace(f); return }
+  if (props.planePick) {
+    const p = facePickAt(ev)
+    if (p) emit('plane-pick', p)
+    return
+  }
   const b = bodyAt(ev)
   if (b >= 0) emit('pick', b)
 }
@@ -280,8 +334,8 @@ function onPointerMove(ev) {
     cubeFaces.forEach((m, i) => { m.color.set(i === f ? 0x5ad2ea : 0xffffff) })
   }
   if (f >= 0) { renderer.domElement.style.cursor = 'pointer'; return }
-  if (!triToBody || hoverRaf) {
-    if (!triToBody) renderer.domElement.style.cursor = downAt && tool.value === 'pan' ? 'grabbing' : TOOL_CURSOR[tool.value]
+  if (!triToBody || props.planePick || hoverRaf) {
+    if (!triToBody || props.planePick) renderer.domElement.style.cursor = idleCursor()
     return
   }
   hoverRaf = requestAnimationFrame(() => {
@@ -708,6 +762,7 @@ onBeforeUnmount(() => {
   renderer?.domElement.removeEventListener('pointerdown', onPointerDown)
   renderer?.domElement.removeEventListener('pointerup', onPointerUp)
   renderer?.domElement.removeEventListener('pointermove', onPointerMove)
+  window.removeEventListener('keydown', onKeyDown)
   resizeObs?.disconnect()
   controls?.dispose()
   renderer?.dispose()
@@ -745,7 +800,7 @@ onBeforeUnmount(() => {
       </button>
     </div>
     <div class="hint micro">
-      scroll zooms at the cursor · cube snaps the view<span v-if="triangleBody"> · click a body to select it</span><span v-if="sliceAxis"> · <template v-if="planes.length > 1">planes = start (solid) and end (dashed) across {{ sliceAxis.toUpperCase() }}<span v-if="sections.length"> · yellow = their traces</span></template><template v-else>plane = the slice across {{ sliceAxis.toUpperCase() }}<span v-if="sections.length"> · yellow = its trace</span></template></span>
+      <template v-if="planePick"><span class="picking">click a face to place the plane<template v-if="!modelVisible"> (show the model first)</template> · Esc cancels</span> · </template>scroll zooms at the cursor · cube snaps the view<span v-if="triangleBody && !planePick"> · click a body to select it</span><span v-if="sliceAxis"> · <template v-if="planes.length > 1">planes = start (solid) and end (dashed) across {{ sliceAxis.toUpperCase() }}<span v-if="sections.length"> · yellow = their traces</span></template><template v-else>plane = the slice across {{ sliceAxis.toUpperCase() }}<span v-if="sections.length"> · yellow = its trace</span></template></span>
     </div>
   </div>
 </template>
@@ -758,6 +813,7 @@ onBeforeUnmount(() => {
   overflow: hidden;
 }
 .viewer :deep(canvas) { display: block; }
+.picking { color: var(--edge); }
 .failure {
   position: absolute;
   inset: 0;
