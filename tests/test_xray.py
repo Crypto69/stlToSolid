@@ -16,7 +16,7 @@ import numpy as np
 import pytest
 import trimesh
 
-from stl_to_solid.section_fit import stack_offsets, section_preview
+from stl_to_solid.section_fit import stack_offsets, stack_extrudes, section_preview
 
 from . import synth
 
@@ -43,6 +43,20 @@ def test_stack_offsets_clamp_swap_single():
     offs = stack_offsets(0.2, 20, 0.2, 100)
     assert len(offs) == 100
     assert offs[-1] == pytest.approx(20.0, abs=1e-12)
+
+
+def test_stack_extrudes_slabs():
+    # each slice to the next, the last a full step
+    assert stack_extrudes([0, 1, 2], 1, 10) == pytest.approx([1, 1, 1])
+    # ...but never past the far face
+    assert stack_extrudes([0, 1, 2], 1, 2.4) == pytest.approx([1, 1, 0.4])
+    # an end plane a hair after the slice before: drawn only, that slab runs through
+    ex = stack_extrudes([0, 1, 2, 2.3], 1, 10)
+    assert ex[:2] == pytest.approx([1, 1]) and ex[2] == pytest.approx(1.3) and ex[3] is None
+    # an end plane on the far face is drawn only
+    assert stack_extrudes([0, 1, 2], 1, 2.005)[-1] is None
+    # one plane: nothing to extrude
+    assert stack_extrudes([3.0], 1, 10) == [None]
 
 
 # --- the stack tracer ----------------------------------------------------------

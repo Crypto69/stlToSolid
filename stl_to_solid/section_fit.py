@@ -968,3 +968,28 @@ def stack_offsets(frm, to, step, half_extent, edge=STACK_EDGE_MM, tol=1e-9):
     if hi - out[-1] > tol:
         out.append(hi)
     return out
+
+
+def stack_extrudes(ats, step, far):
+    """How far each slice of a stack is extruded to make solid slabs:
+    `ats` are the planes' positions along the axis, ascending (mm), `far`
+    the farthest a slab may reach (the part's far face). Every slice runs
+    to the next plane; the last one a full `step`, but never past `far`.
+    The end plane is always cut, so the slice before it may be a hair
+    away: that end plane is then drawn only (None) and the previous slab
+    runs through to where the end slab would have finished. An end plane
+    sitting on the far face is drawn only too. Fewer than two planes:
+    nothing is extruded."""
+    n = len(ats)
+    exts = [None] * n
+    if n < 2:
+        return exts
+    for i in range(n - 1):
+        exts[i] = ats[i + 1] - ats[i]
+    exts[-1] = max(0.0, min(step, far - ats[-1]))
+    if n > 2 and exts[-2] < 0.5 * step:
+        exts[-2] += exts[-1]
+        exts[-1] = None
+    if exts[-1] is not None and exts[-1] < 0.01:
+        exts[-1] = None
+    return exts

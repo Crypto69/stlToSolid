@@ -380,7 +380,7 @@ async def xray_script(job_id: str, axis: str = 'z', frm: float = Query(0.0, alia
     _check_slice_params(axis, tol, join, trim, step)
     job, src = _input_path(job_id)
     from .sections import half_extent, trace_stack, XRAY_MAX
-    from stl_to_solid.section_fit import stack_offsets, STACK_EDGE_MM
+    from stl_to_solid.section_fit import stack_offsets, stack_extrudes, STACK_EDGE_MM
     from stl_to_solid.fusion_export import emit_fusion_xray_script
     try:
         h = await run_in_threadpool(half_extent, src, axis, units, scale)
@@ -399,22 +399,10 @@ async def xray_script(job_id: str, axis: str = 'z', frm: float = Query(0.0, alia
         raise HTTPException(400, f'Could not trace the sections: {describe(e)}')
     n = len(secs)
     exts = [None] * n
-    if extrude and n > 1:
-        # each slice to the next plane (the offsets ascend, so every slab
-        # goes towards +axis); the last one a full spacing, like the add-in,
-        # but never past the part's far face
+    if extrude:
+        # the offsets ascend, so every slab goes towards +axis
         far = secs[-1]['centre'] + secs[-1]['extent'] / 2.0 - STACK_EDGE_MM
-        for i in range(n - 1):
-            exts[i] = secs[i + 1]['at'] - secs[i]['at']
-        exts[-1] = max(0.0, min(step, far - secs[-1]['at']))
-        # the end plane is always cut, so the slice before it may be a
-        # hair away: draw that end plane but let the previous slab run
-        # through to where the end slab would have finished
-        if n > 2 and exts[-2] < 0.5 * step:
-            exts[-2] += exts[-1]
-            exts[-1] = None
-        if exts[-1] is not None and exts[-1] < 0.01:
-            exts[-1] = None                       # the end plane sits on the face
+        exts = stack_extrudes([s['at'] for s in secs], step, far)
     sections = []
     for i, sec in enumerate(secs):
         sections.append({'origin': sec['origin'], 'normal': sec['normal'],
