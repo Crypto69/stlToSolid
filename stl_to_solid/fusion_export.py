@@ -560,17 +560,35 @@ def emit_fusion_sections_script(sections):
 
 _XRAY_RUNTIME = """
 
-def draw_prims(sketch, prims):
-    \"\"\"Draw one fitted loop or open chain (3-D mm primitives) into `sketch`:
-    real lines, three-point arcs, a circle for a whole-circle loop, fitted
-    splines for spline stretches. Nothing here closes a chain: a loop
-    closes because its primitives share end points, an open chain stays
-    open. Returns the curve count.\"\"\"
+def draw_prims(sketch, prims, notes=None):
+    \"\"\"Draw one fitted loop or open chain (3-D mm primitives from
+    the section data) into `sketch`: real lines, three-point arcs, a
+    circle for a whole-circle loop, fitted splines for spline stretches.
+    Nothing here closes a chain: a loop closes because its primitives
+    share end points, an open chain stays open. Returns the curve count.
+
+    Fusion refuses some curves ("Some input argument is invalid"): an arc
+    so flat its three points are collinear to Fusion (a ~1 m radius on a
+    controller's side wall), a zero-length line. One refused curve used to
+    end the whole run; now a refused arc or spline is drawn as straight
+    lines through its own points (same ends, so the loop stays closed) and
+    a refused line is left out. `notes` (a dict) counts them.\"\"\"
     curves = sketch.sketchCurves
+    notes = {} if notes is None else notes
 
     def P(p):
         return sketch.modelToSketchSpace(
             adsk.core.Point3D.create(p[0] / 10.0, p[1] / 10.0, p[2] / 10.0))
+
+    def lines(pts):
+        k = 0
+        for a, b in zip(pts, pts[1:]):
+            try:
+                curves.sketchLines.addByTwoPoints(P(a), P(b))
+                k += 1
+            except Exception:
+                notes['skipped'] = notes.get('skipped', 0) + 1
+        return k
 
     if isinstance(prims, dict):                      # full circle
         curves.sketchCircles.addByCenterRadius(P(prims['center3']), float(prims['r']) / 10.0)
@@ -578,28 +596,37 @@ def draw_prims(sketch, prims):
     n = 0
     for p in prims:
         if p['type'] == 'line':
-            curves.sketchLines.addByTwoPoints(P(p['p0']), P(p['p1']))
+            n += lines([p['p0'], p['p1']])
         elif p['type'] == 'arc':
-            curves.sketchArcs.addByThreePoints(P(p['p0']), P(p['mid']), P(p['p1']))
+            try:
+                curves.sketchArcs.addByThreePoints(P(p['p0']), P(p['mid']), P(p['p1']))
+                n += 1
+            except Exception:
+                notes['arcs_as_lines'] = notes.get('arcs_as_lines', 0) + 1
+                n += lines([p['p0'], p['mid'], p['p1']])
         else:
             pc = adsk.core.ObjectCollection.create()
             for q in p['pts']:
                 pc.add(P(q))
-            curves.sketchFittedSplines.add(pc)
-        n += 1
+            try:
+                curves.sketchFittedSplines.add(pc)
+                n += 1
+            except Exception:
+                notes['splines_as_lines'] = notes.get('splines_as_lines', 0) + 1
+                n += lines(list(p['pts']))
     return n
 
 
-def draw_section(sketch, sec):
-    \"\"\"All loops (outer + holes) and open chains of one section. Returns
-    the curve count.\"\"\"
+def draw_section(sketch, sec, notes=None):
+    \"\"\"All loops (outer + holes) and open chains of a section_preview
+    result. Returns the curve count.\"\"\"
     n = 0
     for outer, holes in sec['loops']:
-        n += draw_prims(sketch, outer)
+        n += draw_prims(sketch, outer, notes)
         for h in holes:
-            n += draw_prims(sketch, h)
+            n += draw_prims(sketch, h, notes)
     for chain in sec.get('open', []):
-        n += draw_prims(sketch, chain)
+        n += draw_prims(sketch, chain, notes)
     return n
 
 
@@ -712,6 +739,7 @@ def run(context):
         prog.isCancelButtonShown = True
         prog.show(TITLE, 'Sketch %v of %m', 0, n, 0)
         made, n_ext, cancelled, bodies, seen, notes, unmatched = 0, 0, False, [], set(), [], 0
+        drawn = {}                                    # curves Fusion refused, redrawn as lines
         for i, sec in enumerate(SECTIONS):
             prog.progressValue = i
             adsk.doEvents()
@@ -727,7 +755,7 @@ def run(context):
             sk.name = sec['name']
             sk.isComputeDeferred = True               # hundreds of curves, one recompute
             try:
-                draw_section(sk, sec)
+                draw_section(sk, sec, drawn)
             finally:
                 sk.isComputeDeferred = False
             made += 1
@@ -749,6 +777,12 @@ def run(context):
         if n_ext:
             live = _live(bodies)
             msg += ', extruded %d into %d body%s' % (n_ext, len(live), '' if len(live) == 1 else 'ies')
+        fixed = drawn.get('arcs_as_lines', 0) + drawn.get('splines_as_lines', 0)
+        if fixed:
+            notes.append('%d near-straight arc(s)/spline(s) Fusion refused were drawn as short '
+                         'lines through the same points' % fixed)
+        if drawn.get('skipped'):
+            notes.append('%d zero-length line(s) left out' % drawn['skipped'])
         if unmatched:
             notes.append('%d slice(s): no profile matched the expected area, so every profile '
                          'was extruded there (a hole along the axis is filled in those slabs)'
