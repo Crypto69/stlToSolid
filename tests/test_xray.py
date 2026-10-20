@@ -387,6 +387,34 @@ def test_xray_runtime_leaves_hole_interiors_alone(monkeypatch):
         ns['_extrude_slice'](root, SimpleNamespace(profiles=_Coll()), 0.02, [], set(), [])
 
 
+def test_xray_runtime_draws_a_refused_arc_as_lines(monkeypatch):
+    """Fusion refuses a near-straight arc ("Some input argument is
+    invalid"), which used to end the whole script. The runtime draws it
+    as two lines through its own points, leaves a refused zero-length
+    line out, and counts both for the closing message."""
+    ns = _runtime(monkeypatch)
+    drawn_lines = []
+
+    def refuse(*a):
+        raise RuntimeError('3 : Some input argument is invalid')
+
+    def line(a, b):
+        if a == b:
+            refuse()
+        drawn_lines.append((a, b))
+    curves = SimpleNamespace(sketchLines=SimpleNamespace(addByTwoPoints=line),
+                             sketchArcs=SimpleNamespace(addByThreePoints=refuse),
+                             sketchFittedSplines=SimpleNamespace(add=refuse))
+    sk = SimpleNamespace(sketchCurves=curves, modelToSketchSpace=lambda p: p)
+    prims = [{'type': 'arc', 'p0': [0, 0, 0], 'mid': [5, 1e-5, 0], 'p1': [10, 0, 0]},
+             {'type': 'line', 'p0': [10, 0, 0], 'p1': [10, 0, 0]},
+             {'type': 'spline', 'pts': [[10, 0, 0], [5, 5, 0], [0, 0, 0]]}]
+    notes = {}
+    assert ns['draw_prims'](sk, prims, notes) == 4
+    assert np.allclose(drawn_lines[0], [(0, 0, 0), (0.5, 1e-6, 0)], atol=1e-12)
+    assert notes == {'arcs_as_lines': 1, 'skipped': 1, 'splines_as_lines': 1}
+
+
 def test_emit_xray_script_draws_lines_arcs_and_splines():
     from stl_to_solid.fusion_export import emit_fusion_xray_script
     p = synth.export(synth.rounded_rect(), '/tmp/_s2s_xray_rr.stl')
