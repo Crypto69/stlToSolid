@@ -113,7 +113,7 @@ def test_open_chain_stays_open():
     assert not np.allclose(pv['polylines'][0][0], pv['polylines'][0][-1])
     txt = emit_fusion_sections_script([{'origin': pv['origin'], 'normal': pv['normal'],
                                         'name': 'u', 'loops': pv['loops'], 'open': pv['open']}])
-    assert txt.count('sketchLines.addByTwoPoints') == 3
+    assert txt[txt.index('def run('):].count('_line2(sk, ') == 3
     compile(txt, 'u.py', 'exec')
     # outline only: the open chain is left out, but still counted
     pv = section_preview(V, F, [0, 0, 0], [0, 0, 1], tol=0.05, closed_only=True)
@@ -598,6 +598,238 @@ def test_sections_script_draws_lines_arcs_and_splines():
     sec = section_preview(m.vertices, m.faces, [0, 0, 0], [0, 0, 1], tol=0.08)
     txt = emit_fusion_sections_script([{'origin': sec['origin'], 'normal': sec['normal'],
                                         'name': 'rr', 'loops': sec['loops']}])
-    assert txt.count('sketchLines.addByTwoPoints') == 4
-    assert txt.count('sketchArcs.addByThreePoints') == 4
+    body = txt[txt.index('def run('):]
+    assert body.count('_line2(sk, ') == 4
+    assert body.count('_arc3(sk, ') == 4
     compile(txt, 'rr.py', 'exec')
+
+
+def test_a_loop_fitted_as_one_arc_is_a_full_circle():
+    """A 0.28 x 0.24 mm grip bump on the RC-N1 controller (y = 1.22, join 5,
+    trim 0.4): the circle test missed it by a hair (0.082 against tol
+    0.08) and the fitter then drew one arc all the way round, from a
+    point back to itself. Fusion refuses that arc ("Some input argument
+    is invalid") and the X-Ray stopped there. It comes back as a full
+    circle now, and no slice of the part holds an arc whose ends meet."""
+    from stl_to_solid.section_fit import fit_loop, lift_prims
+    xy = [[6.247, -12.838], [6.247, -12.8206], [6.2469, -12.6001], [6.1861, -12.6001],
+          [6.1635, -12.6], [6.1604, -12.6], [6.1576, -12.6], [6.1078, -12.6], [6.0591, -12.6],
+          [6.0563, -12.6], [6.0534, -12.6], [6.0309, -12.6], [5.9673, -12.5999],
+          [5.9673, -12.6181], [5.9669, -12.8378]]
+    fit = fit_loop(xy, 0.08)
+    assert isinstance(fit, dict) and fit['full']
+    assert fit['r'] == pytest.approx(0.169, abs=0.01)
+    assert np.allclose(fit['center'], [6.102, -12.749], atol=0.01)
+    frame = (np.zeros(3), np.array([1.0, 0, 0]), np.array([0, 0, 1.0]), np.array([0, 1.0, 0]))
+    assert lift_prims(fit, frame)['type'] == 'circle'
+
+
+def test_sections_script_survives_curves_fusion_refuses():
+    """The single-slice script draws through helpers: a refused arc or
+    spline becomes lines through its own points, a refused zero-length
+    line is left out, and the closing message says so (it used to stop
+    the script with "Some input argument is invalid")."""
+    from types import SimpleNamespace
+    from stl_to_solid.fusion_export import emit_fusion_sections_script
+    txt = emit_fusion_sections_script([])
+    drawn = []
+
+    def refuse(*a):
+        raise RuntimeError('3 : Some input argument is invalid')
+
+    def line(a, b):
+        if a == b:
+            refuse()
+        drawn.append((a, b))
+    adsk = SimpleNamespace(core=SimpleNamespace(ObjectCollection=SimpleNamespace(create=list)))
+    adsk.core.ObjectCollection.create = lambda: SimpleNamespace(items=[], add=lambda q: None)
+    ns = {'adsk': adsk}
+    exec(txt[txt.index('_REDRAWN = {}'):txt.index('def run(')], ns)
+    sk = SimpleNamespace(sketchCurves=SimpleNamespace(
+        sketchLines=SimpleNamespace(addByTwoPoints=line),
+        sketchArcs=SimpleNamespace(addByThreePoints=refuse),
+        sketchFittedSplines=SimpleNamespace(add=refuse)))
+    ns['_arc3'](sk, (0, 0), (1, 0.00001), (2, 0))
+    ns['_spline'](sk, [(2, 0), (3, 1), (4, 0)])
+    ns['_line2'](sk, (4, 0), (4, 0))
+    assert drawn == [((0, 0), (1, 0.00001)), ((1, 0.00001), (2, 0)), ((2, 0), (3, 1)), ((3, 1), (4, 0))]
+    note = ns['_redrawn_note']()
+    assert '2 near-straight arc(s)/spline(s)' in note and '1 tiny curve(s) Fusion refused left out' in note
+
+
+def test_specks_on_the_outline_are_dropped():
+    """A textured surface (the RC-N1 controller's grip) cuts into dozens
+    of 0.3 mm specks sitting across the main outline; in Fusion each one
+    chops the outline into extra profiles and five X-Ray slabs in a row
+    went missing. A speck crossing a bigger outline, or within 2*tol of
+    it, is dropped; one well clear of it, a real hole and a big
+    overlapping loop are kept."""
+    from stl_to_solid.section_fit import drop_crossing_specks
+
+    def sq(x, y, w, h=None):
+        h = w if h is None else h
+        return np.array([[x, y], [x + w, y], [x + w, y + h], [x, y + h]], float)
+    main = sq(0, 0, 50, 30)
+    loops = [(main, [sq(20, 10, 5)]),            # real hole: kept
+             (sq(10, 29.85, 0.3), []),           # speck across the top edge
+             (sq(20, 30.1, 0.3), []),            # speck 0.1 mm above it (within 2*tol)
+             (sq(30, 32.0, 0.3), []),            # speck well clear: kept
+             (sq(-0.4, 12, 0.77, 0.09), []),     # thin sliver across the left edge
+             (sq(45, 10, 10, 10), [])]           # big overlapping loop: kept
+    keep, dropped = drop_crossing_specks(loops, 0.64, 0.16)
+    assert dropped == 3
+    assert len(keep) == 3 and len(keep[0][1]) == 1
+    assert [round(float(o[0][1]), 2) for o, _ in keep] == [0.0, 32.0, 10.0]
+
+
+def test_open_outline_is_reported_with_the_join_that_closes_it():
+    """The RC-N1 controller has two 6.3 mm holes in its mesh at one Y: with
+    Join gaps 6 the outline stays open in two pieces, Outline only drops
+    it, and that X-Ray slice had no slab. The stats say how much stayed
+    open and what Join gaps closes it; the note names the slices."""
+    from stl_to_solid.section_fit import closing_gap, open_outline_note
+    a = np.array([[1.18, 12.59], [1.0, 0.0], [13.75, 0.0], [13.75, 12.6]])
+    b = np.array([[20.2, 12.86], [20.0, 30.0], [-5.0, 30.0], [-5.1, 12.59]])
+    assert closing_gap([a, b]) == pytest.approx(6.45, abs=0.01)
+    assert closing_gap([]) == 0.0
+    ok = {'open_max': 21.5, 'loop_max': 444.8, 'close_gap': 21.5}       # a stray patch: fine
+    bad = {'open_max': 423.0, 'loop_max': 1.1, 'close_gap': 6.45}
+    assert open_outline_note([('+0.11 mm', ok)], 6.0) is None
+    note = open_outline_note([('+0.11 mm', ok), ('+50.11 mm', bad), ('+56.11 mm', bad)], 6.0)
+    assert '2 slices (+50.11 mm, +56.11 mm)' in note
+    assert 'Join gaps (6 mm)' in note and 'Join gaps 6.5 mm would close them' in note
+    wide = dict(bad, close_gap=33.0)
+    note = open_outline_note([('+10.00 mm', wide)], 7.0)
+    assert 'The gap is 33 mm, too wide to join safely' in note and 'would close' not in note
+
+
+def test_open_outline_closed_on_itself_and_across_a_slot():
+    """The RC-N1 controller's vent grate leaves its outline open: at some
+    slices one end of the chain comes down onto the chain's own bottom
+    skin (a T, closed there with a tiny hop and the stub left off); at
+    others the bottom skin is missing along a slot and the ends are 34 mm
+    apart, level (closed by its chord). A bridge that would cross the
+    outline is refused."""
+    from stl_to_solid.section_fit import close_open_outline, signed_area
+    # T: along the bottom from x=40 to x=0, up, over, down to (30, 0.01)
+    t_chain = np.array([[40, 0], [0, 0], [0, 20], [30, 20], [30, 0.01]], float)
+    made, br = close_open_outline([t_chain], gap=2.0)
+    assert made and len(made) == 1 and br[0] == pytest.approx(0.01)
+    assert abs(signed_area(made[0])) == pytest.approx(600, rel=1e-3)     # 30 x 20, stub off
+    # slot: bottom skin missing between the ends, level, 34 mm apart (a
+    # 100 x 40 outline: the bridge is 12 % of it; past 25 % it is refused,
+    # so an open U-shaped sheet is not turned into a solid)
+    slot = np.array([[-17, 0], [-50, 0], [-50, 40], [50, 40], [50, 0], [17, 0]], float)
+    made, br = close_open_outline([slot], gap=2.0)
+    assert made and br == [pytest.approx(34.0)]
+    assert abs(signed_area(made[0])) == pytest.approx(4000, rel=1e-3)
+    u = np.array([[0, 10], [0, 0], [20, 0], [20, 10]], float)
+    assert close_open_outline([u], gap=2.0) == (None, [])
+    # a chord that would cross the outline: refused
+    # (the chain dips through y = 0 at x = 20..25, where the chord runs)
+    hook = np.array([[0, 0], [0, 20], [20, 20], [20, -5], [25, -5], [25, 20], [40, 20], [40, 0]],
+                    float)
+    made, br = close_open_outline([hook], gap=0.5)
+    assert made is None and br == []
+    # a tiny scrap far away is neither stitched in nor counted
+    made, br = close_open_outline([slot, np.array([[200, 200], [200.5, 200]])], gap=2.0)
+    assert made and len(made) == 1 and br == [pytest.approx(34.0)]
+
+
+def test_outline_only_closes_the_open_outline():
+    """A shell with a 34 mm slot in its bottom skin and nothing behind it (a
+    leaky mesh, like the RC-N1 controller's vent grate): with Outline only
+    the cut used to come back with no outline at all; it is closed across
+    the slot now and counted."""
+    from stl_to_solid.section_fit import section_preview
+    V, F = _sheet([[-17, 0], [-50, 0], [-50, 40], [50, 40], [50, 0], [17, 0]])
+    s = section_preview(V, F, [0, 0, 0], [0, 0, 1], tol=0.08, join_mm=2.5, closed_only=True)
+    assert len(s['loops']) == 1 and s['stats']['bridged'] == 1
+    assert s['stats']['bridge_max'] == pytest.approx(34.0, abs=1e-6)
+    assert s['areas_mm2'][0] == pytest.approx(4000, rel=1e-3)
+    assert s['stats']['open_len'] == 0.0
+    # without Outline only the cut is drawn as Fusion draws it: open
+    s = section_preview(V, F, [0, 0, 0], [0, 0, 1], tol=0.08, join_mm=2.5)
+    assert s['loops'] == [] and len(s['open']) == 1 and s['stats']['bridged'] == 0
+
+
+def test_review_2026_10_20_probes():
+    """The code review's probes (docs/XRAY-REVIEW-2026-10-20.md).
+    F1: a 10 x 0.06 mm crescent on an r=50 wall fits as one arc but does
+    not go round: a closed spline, not a 100 mm disc.
+    F2: a bridge between two chains that cuts the outline is refused, not
+    only a closing chord.
+    F3: an open shell with ten closed bosses inside is still closed (the
+    longest open piece against the longest loop, not the totals)."""
+    from stl_to_solid.section_fit import fit_loop, close_open_outline, section_preview
+    th = np.linspace(-0.1, 0.1, 25)
+    crescent = np.vstack([np.c_[50 * np.sin(th), 50 * np.cos(th)],
+                          np.c_[49.94 * np.sin(th[::-1]), 49.94 * np.cos(th[::-1])]])
+    f = fit_loop(crescent, 0.08)
+    assert not isinstance(f, dict) and [p['type'] for p in f] == ['spline']
+    # F2: U of 200 x 150 open at the top; below it a wider U whose ends turn
+    # in to (3, -2) and (197, -2): the nearest-end bridge (0, 150) -> (3, -2)
+    # cuts the first U's bottom edge
+    a = np.array([[0, 150], [0, 0], [200, 0], [200, 150]], float)
+    b = np.array([[3, -2], [-100, -2], [-100, -200], [300, -200], [300, -2], [197, -2]], float)
+    assert close_open_outline([a, b], gap=2.0) == (None, [])
+    # ...and the same two U's with the lower one's ends clear of the edge close
+    b2 = np.array([[-3, -2], [-100, -2], [-100, -200], [300, -200], [300, -2], [203, -2]], float)
+    made, br = close_open_outline([a, b2], gap=2.0)
+    assert made is not None and len(br) == 2
+    # F3: the slotted shell plus ten 8 x 8 bosses inside it
+    xy = [[-17, 0], [-50, 0], [-50, 40], [50, 40], [50, 0], [17, 0]]
+    V, F = _sheet(xy)
+    boxes = [trimesh.creation.box([8, 8, 2]) for _ in range(10)]
+    for k, bx in enumerate(boxes):
+        bx.apply_translation([-45 + 10 * k, 20, 0])
+    Vs, Fs = [V], [F]
+    off = len(V)
+    for bx in boxes:
+        Vs.append(bx.vertices)
+        Fs.append(bx.faces + off)
+        off += len(bx.vertices)
+    s = section_preview(np.vstack(Vs), np.vstack(Fs), [0, 0, 0], [0, 0, 1], tol=0.08, join_mm=2.5,
+                        closed_only=True)
+    assert s['stats']['bridged'] == 1
+    assert max(s['areas_mm2']) == pytest.approx(4000, rel=1e-3)
+
+
+def test_chord_may_graze_a_small_bump_but_not_cut_a_wall():
+    """At the RC-N1 controller's +Y end the outline is open along a 32.6 mm
+    stretch of underside with two 0.3 mm bumps poking past the chord; the
+    chord was refused as crossing the outline and the slice kept only a
+    37 mm2 loop. A crossing segment with an end within `slack` of the
+    bridge's line is a graze; a wall reaching well past it still crosses."""
+    from stl_to_solid.section_fit import _bridge_crosses
+    a, b = np.array([16.0, 0.0]), np.array([-16.0, 0.0])     # the chord, end -> start
+
+    def chain(dip):
+        # start (-16, 0), along the underside with a feature dipping `dip`
+        # below the chord line, up the side, over the top, down to (16, 0)
+        return np.array([[-16, 0], [-12, 0.2], [-10.5, 0.2], [-10.5, -dip], [-10.4, -dip],
+                         [-10.4, 0.2], [-8, 0.2], [-8, 40], [16, 40], [16, 0]], float)
+    assert _bridge_crosses(a, b, chain(0.3)) and not _bridge_crosses(a, b, chain(0.3), slack=0.5)
+    assert _bridge_crosses(a, b, chain(5.0), slack=0.5)
+    # review F2 residual: a fin cutting the chord on a slant, its far vertex
+    # outside the chord's span, is a crossing all the same
+    from stl_to_solid.section_fit import close_open_outline
+    fin = np.array([[0, 30], [0, 0], [40, 0], [40, 10], [25, 20], [45, 40], [45, 30]], float)
+    assert close_open_outline([fin], gap=2.0, slack=0.5) == (None, [])
+
+
+def test_speck_across_a_hole_wall_is_dropped():
+    """Review F6: a speck straddling a hole's wall chops that hole's
+    profile as one on the outer edge chops the outline; it goes too,
+    whether it was nested as a hole of the plate or as a loop of its own."""
+    from stl_to_solid.section_fit import drop_crossing_specks
+
+    def sq(x, y, w, h=None):
+        h = w if h is None else h
+        return np.array([[x, y], [x + w, y], [x + w, y + h], [x, y + h]], float)
+    plate, hole = sq(0, 0, 50, 30), sq(20, 10, 10)[::-1]
+    across = sq(19.85, 15, 0.3)                 # across the hole's left wall
+    keep, dropped = drop_crossing_specks([(plate, [hole, across[::-1]])], 0.64, 0.16)
+    assert dropped == 1 and len(keep[0][1]) == 1
+    keep, dropped = drop_crossing_specks([(plate, [hole]), (across, [])], 0.64, 0.16)
+    assert dropped == 1 and len(keep) == 1

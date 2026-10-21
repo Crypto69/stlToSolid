@@ -11,7 +11,7 @@ import pytest
 import trimesh
 
 SAMPLES = os.path.join(os.path.dirname(__file__), '..', 'samples')
-SCANS = ['Mesh_90p.stl', 'rc2-clean-controller-v2.stl']
+SCANS = ['Mesh_90p.stl', 'rc2-clean-controller-v2.stl', 'DJI_RC-N1_controller_scaled.stl']
 
 
 def _sample(name):
