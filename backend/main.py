@@ -416,6 +416,17 @@ async def xray_script(job_id: str, axis: str = 'z', frm: float = Query(0.0, alia
         notes.append(f"{k} sliver{'s' if k != 1 else ''} trimmed in {n_trim} of {n} slices "
                      f"(Trim slivers up to {trim:g} mm); if the part has real walls that thin, "
                      "lower it")
+    n_br = [s for s in secs if s['stats'].get('bridged')]
+    if n_br:
+        k = sum(s['stats']['bridged'] for s in n_br)
+        big = max(s['stats'].get('bridge_max', 0.0) for s in n_br)
+        notes.append(f"outline closed across {k} mesh gap{'s' if k != 1 else ''} in {len(n_br)} of "
+                     f"{n} slices (largest {big:.2f} mm): holes in the mesh skin, filled with a "
+                     "straight wall")
+    from stl_to_solid.section_fit import open_outline_note
+    open_note = open_outline_note([(f"{axis.upper()}={s['at']:.2f} mm", s['stats']) for s in secs], join)
+    if open_note:
+        notes.insert(0, 'WARNING: ' + open_note)
     lo, hi = sorted((frm, to))
     title = f'X-Ray {axis.upper()} {lo:+.1f}..{hi:+.1f} mm every {step:g} mm'
     text = emit_fusion_xray_script(sections, title=title, notes=notes)

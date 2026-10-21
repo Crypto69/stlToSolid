@@ -13,5 +13,16 @@ export function summarise(st, outline) {
   let tail = ''
   if (st.joins) tail = `; ${st.joins} gap${st.joins === 1 ? '' : 's'} joined (largest ${st.max_gap.toFixed(2)} mm)`
   if (st.trimmed) tail += `; ${st.trimmed} sliver${st.trimmed === 1 ? '' : 's'} trimmed`
+  if (st.specks) tail += `; ${st.specks} speck${st.specks === 1 ? '' : 's'} on the outline dropped`
+  if (st.bridged) tail += `; outline closed across ${st.bridged} mesh gap${st.bridged === 1 ? '' : 's'} (largest ${(st.bridge_max || 0).toFixed(2)} mm)`
+  // the longest open piece is longer than the longest closed loop
+  // (section_fit.outline_open): the outline has a mesh hole wider than
+  // Join gaps, and this slice has no profile (no slab in Fusion)
+  if ((st.open_max || 0) > (st.loop_max || 0)) {
+    const need = Math.ceil((st.close_gap || 0) * 2 - 1e-9) / 2
+    tail += need > 10
+      ? `; OUTLINE NOT CLOSED: a ${need.toFixed(1)} mm hole in the mesh, too wide to join safely`
+      : `; OUTLINE NOT CLOSED: Join gaps ${need.toFixed(1)} mm would close it`
+  }
   return `${head}: ${parts.join(', ') || 'nothing'}${tail}; worst miss ${st.dev_max.toFixed(3)} mm`
 }

@@ -483,19 +483,77 @@ def _prim_curves(prims, indent, sk='sk'):
         return f"{sk}.modelToSketchSpace(adsk.core.Point3D.create({_cm(p[0])}, {_cm(p[1])}, {_cm(p[2])}))"
     L = []
     if isinstance(prims, dict):                   # full circle
-        L.append(f"{indent}{sk}.sketchCurves.sketchCircles.addByCenterRadius({P(prims['center3'])}, {_cm(prims['r'])})")
+        L.append(f"{indent}_circle({sk}, {P(prims['center3'])}, {_cm(prims['r'])})")
         return L
+    # through _SAFE_DRAW's helpers: a curve Fusion refuses is redrawn as
+    # lines (or left out) instead of ending the script
     for p in prims:
         if p['type'] == 'line':
-            L.append(f"{indent}{sk}.sketchCurves.sketchLines.addByTwoPoints({P(p['p0'])}, {P(p['p1'])})")
+            L.append(f"{indent}_line2({sk}, {P(p['p0'])}, {P(p['p1'])})")
         elif p['type'] == 'arc':
-            L.append(f"{indent}{sk}.sketchCurves.sketchArcs.addByThreePoints({P(p['p0'])}, {P(p['mid'])}, {P(p['p1'])})")
+            L.append(f"{indent}_arc3({sk}, {P(p['p0'])}, {P(p['mid'])}, {P(p['p1'])})")
         else:
-            L.append(f"{indent}pc = adsk.core.ObjectCollection.create()")
+            L.append(f"{indent}_spline({sk}, [")
             for q in p['pts']:
-                L.append(f"{indent}pc.add({P(q)})")
-            L.append(f"{indent}{sk}.sketchCurves.sketchFittedSplines.add(pc)")
+                L.append(f"{indent}    {P(q)},")
+            L.append(f"{indent}])")
     return L
+
+
+# drawing helpers the sections script carries (see _prim_curves)
+_SAFE_DRAW = '''
+# Fusion refuses some curves ("Some input argument is invalid"): an arc so
+# flat its three points are collinear to Fusion, a zero-length line. One
+# refused curve must not end the script: a refused arc or spline is drawn
+# as lines through its own points (same ends, the loop stays closed), a
+# refused line or circle is left out, and the closing message counts them.
+_REDRAWN = {}
+
+
+def _line2(sk, a, b):
+    try:
+        sk.sketchCurves.sketchLines.addByTwoPoints(a, b)
+    except Exception:
+        _REDRAWN['skipped'] = _REDRAWN.get('skipped', 0) + 1
+
+
+def _circle(sk, c, r):
+    try:
+        sk.sketchCurves.sketchCircles.addByCenterRadius(c, r)
+    except Exception:
+        _REDRAWN['skipped'] = _REDRAWN.get('skipped', 0) + 1
+
+
+def _arc3(sk, a, m, b):
+    try:
+        sk.sketchCurves.sketchArcs.addByThreePoints(a, m, b)
+    except Exception:
+        _REDRAWN['curves_as_lines'] = _REDRAWN.get('curves_as_lines', 0) + 1
+        _line2(sk, a, m)
+        _line2(sk, m, b)
+
+
+def _spline(sk, pts):
+    pc = adsk.core.ObjectCollection.create()
+    for q in pts:
+        pc.add(q)
+    try:
+        sk.sketchCurves.sketchFittedSplines.add(pc)
+    except Exception:
+        _REDRAWN['curves_as_lines'] = _REDRAWN.get('curves_as_lines', 0) + 1
+        for a, b in zip(pts, pts[1:]):
+            _line2(sk, a, b)
+
+
+def _redrawn_note():
+    out = ''
+    if _REDRAWN.get('curves_as_lines'):
+        out += ('\\n%d near-straight arc(s)/spline(s) Fusion refused were drawn as short '
+                'lines through the same points' % _REDRAWN['curves_as_lines'])
+    if _REDRAWN.get('skipped'):
+        out += '\\n%d tiny curve(s) Fusion refused left out' % _REDRAWN['skipped']
+    return out
+'''
 
 
 def emit_fusion_sections_script(sections):
@@ -520,11 +578,13 @@ def emit_fusion_sections_script(sections):
     ]
     base = emit_fusion_script([])
     L.append(base[base.index('def _plane('):base.index('def _pick(')].rstrip('\n'))
+    L.append(_SAFE_DRAW.rstrip('\n'))
     L += [
         '',
         '',
         'def run(context):',
         '    ui = None',
+        '    _REDRAWN.clear()',
         '    try:',
         '        app = adsk.core.Application.get()',
         '        ui = app.userInterface',
@@ -546,7 +606,7 @@ def emit_fusion_sections_script(sections):
         for chain in sec.get('open', []):
             L += _prim_curves(chain, ind)
     L += [
-        f"{ind}ui.messageBox('stlToSolid: drew {len(sections)} section sketch(es)')",
+        f"{ind}ui.messageBox('stlToSolid: drew {len(sections)} section sketch(es)' + _redrawn_note())",
         '    except:',
         "        if ui:",
         "            ui.messageBox('stlToSolid sections script failed:\\n{}'.format(traceback.format_exc()))",
@@ -569,10 +629,11 @@ def draw_prims(sketch, prims, notes=None):
 
     Fusion refuses some curves ("Some input argument is invalid"): an arc
     so flat its three points are collinear to Fusion (a ~1 m radius on a
-    controller's side wall), a zero-length line. One refused curve used to
-    end the whole run; now a refused arc or spline is drawn as straight
-    lines through its own points (same ends, so the loop stays closed) and
-    a refused line is left out. `notes` (a dict) counts them.\"\"\"
+    controller's side wall), a zero-length line, a too-small circle. One
+    refused curve used to end the whole run; now a refused arc or spline
+    is drawn as straight lines through its own points (same ends, so the
+    loop stays closed) and a refused line or circle is left out. `notes`
+    (a dict) counts them.\"\"\"
     curves = sketch.sketchCurves
     notes = {} if notes is None else notes
 
@@ -591,8 +652,12 @@ def draw_prims(sketch, prims, notes=None):
         return k
 
     if isinstance(prims, dict):                      # full circle
-        curves.sketchCircles.addByCenterRadius(P(prims['center3']), float(prims['r']) / 10.0)
-        return 1
+        try:
+            curves.sketchCircles.addByCenterRadius(P(prims['center3']), float(prims['r']) / 10.0)
+            return 1
+        except Exception:
+            notes['skipped'] = notes.get('skipped', 0) + 1
+            return 0
     n = 0
     for p in prims:
         if p['type'] == 'line':
@@ -740,6 +805,7 @@ def run(context):
         prog.show(TITLE, 'Sketch %v of %m', 0, n, 0)
         made, n_ext, cancelled, bodies, seen, notes, unmatched = 0, 0, False, [], set(), [], 0
         drawn = {}                                    # curves Fusion refused, redrawn as lines
+        n_fail = 0                                    # slabs that could not be extruded
         for i, sec in enumerate(SECTIONS):
             prog.progressValue = i
             adsk.doEvents()
@@ -770,19 +836,24 @@ def run(context):
                 except Exception:
                     why = traceback.format_exc().strip().splitlines()[-1]
                     notes.append('%s: extrude failed: %s' % (sk.name, why))
+                    n_fail += 1
         prog.hide()
         msg = 'stlToSolid %s: drew %d of %d section sketch(es)' % (TITLE, made, n)
+        if n_fail:
+            msg = ('WARNING: %d slab(s) could not be extruded (gaps in the solid); the first '
+                   'ones are listed below\\n\\n'
+                   % n_fail) + msg
         if cancelled:
             msg += ' (stopped)'
         if n_ext:
             live = _live(bodies)
-            msg += ', extruded %d into %d body%s' % (n_ext, len(live), '' if len(live) == 1 else 'ies')
+            msg += ', extruded %d into %d %s' % (n_ext, len(live), 'body' if len(live) == 1 else 'bodies')
         fixed = drawn.get('arcs_as_lines', 0) + drawn.get('splines_as_lines', 0)
         if fixed:
             notes.append('%d near-straight arc(s)/spline(s) Fusion refused were drawn as short '
                          'lines through the same points' % fixed)
         if drawn.get('skipped'):
-            notes.append('%d zero-length line(s) left out' % drawn['skipped'])
+            notes.append('%d tiny curve(s) Fusion refused left out' % drawn['skipped'])
         if unmatched:
             notes.append('%d slice(s): no profile matched the expected area, so every profile '
                          'was extruded there (a hole along the axis is filled in those slabs)'

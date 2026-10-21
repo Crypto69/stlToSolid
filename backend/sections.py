@@ -24,7 +24,9 @@ _cache = {'key': None, 'mesh': None, 'spans': {}}
 
 _ZERO_STATS = {'loops': 0, 'holes': 0, 'open': 0, 'inner': 0, 'lines': 0, 'arcs': 0,
                'circles': 0, 'splines': 0, 'joins': 0, 'max_gap': 0.0, 'dev_max': 0.0,
-               'junction_gap': 0.0, 'trimmed': 0}
+               'junction_gap': 0.0, 'trimmed': 0, 'specks': 0, 'open_len': 0.0,
+               'loop_len': 0.0, 'open_max': 0.0, 'loop_max': 0.0, 'close_gap': 0.0, 'bridged': 0,
+               'bridge_max': 0.0}
 
 
 def _mesh(path, units, scale):

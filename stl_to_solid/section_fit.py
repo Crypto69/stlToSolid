@@ -173,6 +173,243 @@ def join_chains(chains, xy, join_mm):
     return done + [(c, False) for c in open_], n_join, max_gap
 
 
+def _big_chains(chains, min_frac=0.05):
+    """The open chains that carry the outline: at least `min_frac` of
+    the total open length. Scraps (a loose patch of a leaky mesh) are left
+    out, so they neither get stitched into the outline nor make the gap
+    that would close it look huge."""
+    cs = [np.asarray(c, float) for c in chains if len(c) >= 2]
+    total = sum(_length(c, False) for c in cs)
+    return [c for c in cs if _length(c, False) >= min_frac * total]
+
+
+def closing_gap(chains):
+    """The Join gaps value that would close these open 2-D chains (point
+    arrays): join_chains' closest-ends-first rule run with no limit on the
+    chains that carry the outline (_big_chains), and the widest gap it
+    bridges. 0.0 for no chains. Said to the user when a slice's outline
+    stays open (a mesh hole wider than Join gaps)."""
+    open_ = _big_chains(chains)
+    worst = 0.0
+    while open_:
+        E = np.array([c[k] for c in open_ for k in (0, -1)])
+        D = np.linalg.norm(E[:, None, :] - E[None, :, :], axis=2)
+        np.fill_diagonal(D, np.inf)
+        i, j = np.unravel_index(int(np.argmin(D)), D.shape)
+        worst = max(worst, float(D[i, j]))
+        ci, cj = i // 2, j // 2
+        if ci == cj:
+            open_.pop(ci)
+            continue
+        a = open_[ci] if i % 2 else open_[ci][::-1]
+        b = open_[cj] if j % 2 == 0 else open_[cj][::-1]
+        for k in sorted((ci, cj), reverse=True):
+            open_.pop(k)
+        open_.append(np.vstack([a, b]))
+    return worst
+
+
+def outline_open(st):
+    """True when a slice's outline stayed open: its longest open piece is
+    longer than its longest closed loop (stats open_max, loop_max)."""
+    return st.get('open_max', 0.0) > st.get('loop_max', 0.0)
+
+
+def open_outline_note(slices, join_mm):
+    """One sentence for the slices whose outline stayed open: `slices` is
+    [(label, stats)] of a stack; a slice counts when its longest open
+    piece is longer than its longest closed loop (outline_open), which
+    loses its slab. None when there are none."""
+    bad = [(lab, st) for lab, st in slices if outline_open(st)]
+    if not bad:
+        return None
+    need = max(st.get('close_gap', 0.0) for _, st in bad)
+    need = math.ceil(need * 2.0 - 1e-9) / 2.0          # the half millimetre at or above it
+    labs = ', '.join(lab for lab, _ in bad[:8]) + (', ...' if len(bad) > 8 else '')
+    head = ('the outline did not close in {} slice{} ({}): the mesh has gaps wider than Join gaps '
+            '({:g} mm) there, so {} no profile and no slab. '.format(
+                len(bad), '' if len(bad) == 1 else 's', labs, join_mm,
+                'that slice has' if len(bad) == 1 else 'those slices have'))
+    if need > 10.0:                                     # the same rule as the web summary
+        # a Join gaps that wide would stitch unrelated pieces together
+        return head + ('The gap is {:g} mm, too wide to join safely: start or end the stack '
+                       'clear of {}, or untick Outline only to see the open pieces.'.format(
+                           need, 'it' if len(bad) == 1 else 'them'))
+    return head + 'Join gaps {:g} mm would close {}.'.format(need, 'it' if len(bad) == 1 else 'them')
+
+
+def _bridge_crosses(a, b, chain, slack=0.0):
+    """Does the straight bridge a -> b properly cross any segment of the
+    open polyline `chain` (its own segments only, none made up between
+    its last and first point)? With `slack`, crossings where the chain
+    pokes no further than `slack` past the bridge (on the side away from
+    the bulk of the chain, within the bridge's span) are a graze, not a
+    wall in the way: 0.3 mm bumps on the RC-N1 controller's underside
+    under a 32 mm chord."""
+    if len(chain) < 2:
+        return False
+    A, B = chain[:-1], chain[1:]
+    r = b - a
+    s_ = B - A
+    rxs = r[0] * s_[:, 1] - r[1] * s_[:, 0]
+    qp = A - a
+    with np.errstate(divide='ignore', invalid='ignore'):
+        t = (qp[:, 0] * s_[:, 1] - qp[:, 1] * s_[:, 0]) / rxs
+        u = (qp[:, 0] * r[1] - qp[:, 1] * r[0]) / rxs
+    hit = (np.abs(rxs) > 1e-12) & (t > 1e-6) & (t < 1 - 1e-6) & (u > 1e-6) & (u < 1 - 1e-6)
+    if slack > 0 and hit.any():
+        rl = max(float(np.linalg.norm(r)), 1e-30)
+        nrm = np.array([-r[1], r[0]]) / rl
+        side = (chain - a) @ nrm
+        along = (chain - a) @ (r / rl)
+        bulk = 1.0 if side.mean() >= 0 else -1.0
+        past = (side * bulk < 0) & (along > 0) & (along < rl)
+        depth = float(np.max(-side[past] * bulk)) if past.any() else 0.0
+        # and the far end of every segment that crosses it, wherever that
+        # end lies: a wall cutting the bridge and leaving its span on a
+        # slant has its far vertex outside the span (review F2)
+        sa, sb = side[:-1][hit], side[1:][hit]
+        far = np.where(sa * bulk < 0, -sa * bulk, -sb * bulk)
+        if len(far):
+            depth = max(depth, float(far.max()))
+        return depth > slack
+    return bool(hit.any())
+
+
+def _close_on_itself(c, gap):
+    """An open chain whose end comes down onto its own outline (a grate
+    bar's wall stopping on the bottom skin it belongs to: a T, not a gap):
+    the loop from the touch point to that end, closed by a hop of at most
+    `gap`; the stub beyond the touch point is left off. Of every place
+    either end could close (segments far enough along the chain that a
+    real loop goes round first) the one enclosing the most area wins: an
+    end can also touch a grate bar a few mm along, which would give a
+    sliver. Returns (loop, hop length) or (None, None)."""
+    n = len(c)
+    if n < 4:
+        return None, None
+    seg = np.linalg.norm(np.diff(c, axis=0), axis=1)
+    along = np.concatenate([[0.0], np.cumsum(seg)])
+    A, B = c[:-1], c[1:]
+    d = B - A
+    L2 = np.maximum(np.einsum('ij,ij->i', d, d), 1e-30)
+    cr = A[:, 0] * B[:, 1] - A[:, 1] * B[:, 0]         # shoelace terms, segment k
+    pre = np.concatenate([[0.0], np.cumsum(cr)])        # pre[k] = sum of terms < k
+    best, best_area, best_hop = None, 0.0, None
+    for last in (True, False):
+        e = c[-1] if last else c[0]
+        t = np.clip(np.einsum('ij,ij->i', e - A, d) / L2, 0.0, 1.0)
+        foot = A + t[:, None] * d
+        dist = np.linalg.norm(foot - e, axis=1)
+        s_at = along[:-1] + t * seg
+        ok = (dist <= gap) & ((along[-1] - s_at > 2 * gap) if last else (s_at > 2 * gap))
+        ks = np.flatnonzero(ok)
+        if not len(ks):
+            continue
+        f = foot[ks]
+        if last:
+            # loop: f -> c[k+1] -> ... -> c[n-1] -> f
+            nx = c[ks + 1]
+            area2 = (f[:, 0] * nx[:, 1] - f[:, 1] * nx[:, 0]) + (pre[n - 1] - pre[ks + 1]) \
+                + (e[0] * f[:, 1] - e[1] * f[:, 0])
+        else:
+            # loop: c[0] -> ... -> c[k] -> f -> c[0]
+            ck = c[ks]
+            area2 = pre[ks] + (ck[:, 0] * f[:, 1] - ck[:, 1] * f[:, 0]) + (f[:, 0] * e[1] - f[:, 1] * e[0])
+        m = int(np.argmax(np.abs(area2)))
+        if abs(area2[m]) / 2.0 > best_area:
+            k = int(ks[m])
+            loop = np.vstack([foot[k], c[k + 1:]]) if last else np.vstack([c[:k + 1], foot[k]])
+            best, best_area, best_hop = loop, abs(area2[m]) / 2.0, float(dist[k])
+    return (best, best_hop) if best is not None else (None, None)
+
+
+def close_open_outline(chains, max_bridge_frac=0.25, gap=1.0, slack=0.5):
+    """Close an outline the mesh left open (a vent grate's slots: the
+    RC-N1 controller's underside has no skin along a 34 mm slot, so the
+    cut is one open chain with its ends 34 mm apart and no Join gaps value
+    closes it sensibly). The chains that carry the outline (_big_chains)
+    are joined closest ends first with no distance limit; the last chain
+    is closed on itself where an end lands on its own outline
+    (_close_on_itself, a hop no longer than `gap`) or by its chord,
+    whichever valid closing encloses more area: straight bridges across
+    the holes, which fill them as a solid would be. Refused (None, [])
+    when any bridge longer than `gap` crosses the loop it ends up in by
+    more than `slack` (hops no longer than `gap` are not checked, as joins
+    are not), or the bridges add up to more than `max_bridge_frac`
+    of the loop. Returns (closed loops, bridge lengths)."""
+    open_ = _big_chains(chains)
+    if not open_:
+        return None, []
+    done, bridges, long_ = [], [], []          # long_: (a, b) of bridges > gap
+
+    def bridge(a, b):
+        L = float(np.linalg.norm(b - a))
+        bridges.append(L)
+        if L > gap:
+            long_.append((a.copy(), b.copy()))
+
+    def valid(loops, brs, longs):
+        total = sum(_length(c, True) for c in loops)
+        if any(len(c) < 3 for c in loops) or sum(brs) > max_bridge_frac * total:
+            return False
+        return not any(_bridge_crosses(a, b, np.vstack([c, c[:1]]), slack)
+                       for a, b in longs for c in loops)
+
+    while open_:
+        if len(open_) == 1:
+            # the last chain: closed on itself (an end landing on its own
+            # outline) or by its chord, whichever valid way encloses more;
+            # an end can touch a grate bar a few mm along and give a 37 mm2
+            # loop where the chord gives the 5000 mm2 outline
+            c = open_.pop()
+            options = []
+            loop, hop = _close_on_itself(c, gap)
+            if loop is not None:
+                options.append((done + [loop], bridges + [hop], list(long_)))
+            L = float(np.linalg.norm(c[-1] - c[0]))
+            options.append((done + [c], bridges + [L],
+                            long_ + ([(c[-1].copy(), c[0].copy())] if L > gap else [])))
+            ok = [o for o in options if valid(*o)]
+            if not ok:
+                return None, []
+            area = [sum(abs(signed_area(x)) for x in o[0]) for o in ok]
+            # closing on itself wins a near tie: the chord there runs back
+            # along the stub it leaves, a zero-width spike
+            if loop is not None and len(ok) == 2 and area[0] >= 0.95 * area[1]:
+                return ok[0][0], ok[0][1]
+            best = ok[int(np.argmax(area))]
+            return best[0], best[1]
+        E = np.array([c[k] for c in open_ for k in (0, -1)])
+        D = np.linalg.norm(E[:, None, :] - E[None, :, :], axis=2)
+        np.fill_diagonal(D, np.inf)
+        i, j = np.unravel_index(int(np.argmin(D)), D.shape)
+        ci, cj = i // 2, j // 2
+        if ci == cj:                                  # a chain closing on itself
+            c = open_.pop(ci)
+            bridge(c[-1], c[0])
+            done.append(c)
+            continue
+        a = open_[ci] if i % 2 else open_[ci][::-1]
+        b = open_[cj] if j % 2 == 0 else open_[cj][::-1]
+        bridge(a[-1], b[0])
+        for k in sorted((ci, cj), reverse=True):
+            open_.pop(k)
+        open_.append(np.vstack([a, b]))
+    if not valid(done, bridges, long_):
+        return None, []
+    return done, bridges
+
+
+def _length(xy, closed):
+    xy = np.asarray(xy, float)
+    if len(xy) < 2:
+        return 0.0
+    if closed:
+        xy = np.vstack([xy, xy[:1]])
+    return float(np.linalg.norm(np.diff(xy, axis=0), axis=1).sum())
+
+
 def signed_area(xy):
     x, y = xy[:, 0], xy[:, 1]
     return 0.5 * float(np.sum(x * np.roll(y, -1) - np.roll(x, -1) * y))
@@ -645,6 +882,30 @@ def fit_loop(xy, tol=0.08, mesh_pts=None, min_prim_mm=None, min_run=3, clean=Fal
     prims = segment_polyline(pts, tol=tol, closed=closed)
     if not prims:
         return []
+    if closed and len(prims) == 1 and prims[0]['type'] == 'arc':
+        # one arc all the way round: start and end are the same point, and
+        # Fusion's three-point arc refuses that ("Some input argument is
+        # invalid", which ended a whole X-Ray). When the points really go
+        # round it is a circle the circle test only just missed (a 0.34 mm
+        # ring on the RC-N1 controller, 15 thinned points, 0.082 mm off
+        # against tol 0.08): draw it as one. When they do not (a thin
+        # sliver along a curved wall sits within tol of that wall's huge
+        # circle: try_full_circle's min_cover rule) it is a closed spline
+        # through its points, never a 100 mm disc.
+        a = prims[0]
+        ring = np.vstack([pts, pts[:1]])
+        perim = float(np.linalg.norm(np.diff(ring, axis=0), axis=1).sum())
+        if perim >= 0.8 * 2.0 * np.pi * float(a['r']):
+            circ = {'type': 'arc', 'center': np.asarray(a['center'], float), 'r': float(a['r']),
+                    'dev': float(a.get('dev', 0.0)), 'full': True, '_pts': pts}
+            if mesh_pts is not None:
+                refine_arcs_with_points([circ], mesh_pts, tol)
+            return circ
+        keep = douglas_peucker(ring, tol / 2)[:-1]
+        if len(keep) < 3:
+            keep = np.arange(len(pts))
+        return [{'type': 'spline', 'pts': pts[keep], 'p0': pts[keep][0].copy(),
+                 'p1': pts[keep][0].copy(), 'closed': True, '_pts': pts}]
     if mesh_pts is not None:
         refine_arcs_with_points(prims, mesh_pts, tol)
     if clean:
@@ -799,6 +1060,74 @@ def polyline_deviation(pts, ref):
     return _seg_dist_max(pts, ref, np.roll(ref, -1, axis=0))
 
 
+def _span(xy):
+    xy = np.asarray(xy, float)
+    return float(np.linalg.norm(xy.max(0) - xy.min(0))) if len(xy) else 0.0
+
+
+def _touches(small, big, gap):
+    """True when loop `small` crosses loop `big` (points on both sides) or
+    comes within `gap` of its outline. Within the gap is enough: both are
+    fitted afterwards, each free to stray by the tolerance, and a speck
+    that only touched the raw outline crosses the fitted one."""
+    small, big = np.asarray(small, float), np.asarray(big, float)
+    if len(small) < 3 or len(big) < 3:
+        return False
+    lo, hi = small.min(0) - gap, small.max(0) + gap
+    if np.any(hi < big.min(0)) or np.any(lo > big.max(0)):
+        return False
+    a, b = big, np.roll(big, -1, axis=0)
+    near = ~(np.any(np.maximum(a, b) < lo, axis=1) | np.any(np.minimum(a, b) > hi, axis=1))
+    if not near.any():
+        return False
+    a, b = a[near], b[near]
+    d = b - a
+    L2 = np.maximum(np.einsum('ij,ij->i', d, d), 1e-30)
+    t = np.clip(np.einsum('kij,ij->ki', small[:, None, :] - a[None], d) / L2, 0.0, 1.0)
+    dist = np.linalg.norm(small[:, None, :] - (a[None] + t[..., None] * d[None]), axis=2).min()
+    if dist <= gap:
+        return True
+    ins = [point_in_loop(q, big) for q in small]
+    return any(ins) and not all(ins)
+
+
+def drop_crossing_specks(loops, size_mm, gap):
+    """Drop the specks, loops no bigger than `size_mm` across (or with
+    less area than a quarter of size_mm squared: a thin sliver), whose
+    outline crosses a bigger loop's or comes within `gap` of it: an
+    outer's, or a hole's (a speck straddling a hole's wall chops that
+    hole's profile the same way).
+
+    A textured surface (the RC-N1 controller's grip: 0.3 mm bumps)
+    cuts into dozens of such specks sitting across the main outline. In
+    a Fusion sketch every one of them chops the outline into extra
+    profiles, and five slices of an X-Ray in a row lost their slabs to
+    it, a 10 mm groove round the part. A speck that size is under the
+    fit tolerance anyway. Specks wholly inside or outside are left alone.
+    Returns (loops, specks dropped)."""
+    def speck(xy):
+        return _span(xy) <= size_mm or abs(signed_area(np.asarray(xy, float))) <= 0.25 * size_mm ** 2
+
+    # the outlines a speck can chop: every outer and hole that is not a
+    # speck itself (two specks touching are harmless, and testing every
+    # pair was quadratic: 6 s a slice at 2000 specks)
+    walls = [(i, r) for i, (o, h) in enumerate(loops) for r in [o] + list(h) if not speck(r)]
+
+    def chops(r):
+        sp = _span(r)
+        return any(_span(w) > sp and _touches(r, w, gap) for _, w in walls)
+
+    keep, dropped = [], 0
+    for i, (outer, holes) in enumerate(loops):
+        if speck(outer) and chops(outer):
+            dropped += 1 + len(holes)
+            continue
+        h2 = [h for h in holes if not (speck(h) and chops(h))]
+        dropped += len(holes) - len(h2)
+        keep.append((outer, h2))
+    return keep, dropped
+
+
 def outer_only(loops):
     """Of nested loops [(outer, holes)], keep the outers that sit inside
     no other outer, and drop every hole. Returns (loops, inner dropped)."""
@@ -828,11 +1157,44 @@ def fit_section(V, F, origin, normal, tol=0.08, mesh_pts=None, join_mm=0.0, trim
     cut out first (`trim_slivers`), counted in stats['trimmed'].
     `closed_only` keeps just the outer outlines: inner loops and open
     chains are counted (stats['inner'], stats['open']) but neither
-    trimmed nor fitted, which is most of the work on a busy section."""
+    trimmed nor fitted, which is most of the work on a busy section.
+    Specks (loops under max(0.6, 8*tol) mm across) that cross a bigger
+    outline or come within 2*tol of it are dropped (`drop_crossing_specks`), counted in
+    stats['specks']."""
     loops, opens, frame, jst = section_curves(V, F, origin, normal, join_mm=join_mm)
     fitted, stats = [], dict(loops=0, holes=0, open=0, inner=0, lines=0, arcs=0, circles=0,
                              splines=0, joins=jst['joins'], max_gap=jst['max_gap'],
-                             dev_max=0.0, junction_gap=0.0, trimmed=0)
+                             dev_max=0.0, junction_gap=0.0, trimmed=0, specks=0,
+                             open_len=0.0, loop_len=0.0, open_max=0.0, loop_max=0.0,
+                             close_gap=0.0)
+    # With Outline only an outline left open is dropped, and an X-Ray slab
+    # with it (the RC-N1 controller's vent grate: mesh holes up to 34 mm
+    # at the slots, whole outlines gone from X-Ray slices). When most of
+    # the cut is open, close the outline across the holes; say so.
+    stats.update(bridged=0, bridge_max=0.0)
+    open_len = sum(_length(c, False) for c in opens)
+    # the dominant feature decides, not the totals: ten screw bosses inside
+    # an open shell add up to more closed length than the shell's outline
+    open_max = max((_length(c, False) for c in opens), default=0.0)
+    loop_max = max((_length(o, True) for o, _ in loops), default=0.0)
+    if closed_only and opens and open_max > loop_max:
+        made, bridges = close_open_outline(opens, gap=max(join_mm, 2.0 * tol),
+                                           slack=max(0.5, 4.0 * tol))
+        if made:
+            rings = [r for o, h in loops for r in [o] + list(h)] + made
+            loops = nest_loops(rings)
+            # what is left open are the scraps _big_chains passed over
+            opens = [c for c in opens if _length(c, False) < 0.05 * open_len]
+            stats['bridged'] = len(bridges)
+            stats['bridge_max'] = max(bridges)
+    # how much of the cut is still open, and what Join gaps would close
+    # it (open_outline_note warns when that loses a slice)
+    stats['open_len'] = sum(_length(c, False) for c in opens)
+    stats['loop_len'] = sum(_length(o, True) for o, _ in loops)
+    stats['open_max'] = max((_length(c, False) for c in opens), default=0.0)
+    stats['loop_max'] = max((_length(o, True) for o, _ in loops), default=0.0)
+    if opens:
+        stats['close_gap'] = closing_gap(opens)
     if closed_only:
         stats['open'] = len(opens)
         opens = []
@@ -848,6 +1210,9 @@ def fit_section(V, F, origin, normal, tol=0.08, mesh_pts=None, join_mm=0.0, trim
                 h2.append(q)
             trimmed.append((o2, h2))
         loops = trimmed
+    # loops smaller than the shortest primitive the fit draws (see
+    # fit_loop's min_prim_mm) that cross a bigger outline
+    loops, stats['specks'] = drop_crossing_specks(loops, max(0.6, 8.0 * tol), 2.0 * tol)
     if closed_only:
         loops, stats['inner'] = outer_only(loops)
 
