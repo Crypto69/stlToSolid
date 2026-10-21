@@ -61,6 +61,7 @@ const sectionSummary = computed(() => summarise(store.section?.stats, store.slic
       <label for="slice_mm">
         Slice spacing
         <span class="unit num">mm</span>
+        <span class="tag gen">used by the loft</span>
       </label>
       <input
         id="slice_mm" type="number" step="0.1" min="0.05" max="50"
@@ -70,17 +71,25 @@ const sectionSummary = computed(() => summarise(store.section?.stats, store.slic
     </div>
     <AxisSelect />
     <div v-if="store.sliceHalfExtent > 0" class="slice">
-      <PlaneSlider v-model="store.sliceOffset" id="slice_offset" label="Single slice" pick-key="sliceOffset" />
+      <p class="previewhead">
+        <span class="tag">preview</span>
+        Check one slice before you loft. Nothing in this box is generated on
+        its own; the button below lofts {{ store.params.slice_range_mm > 0 ? 'the stretch you set under Loft only' : 'the whole part' }}.
+      </p>
+      <PlaneSlider v-model="store.sliceOffset" id="slice_offset"
+                   :label="store.params.slice_range_mm > 0 ? 'Loft starts at' : 'Preview slice'"
+                   pick-key="sliceOffset" />
       <p class="hint">
         Move the slider and the plane in the 3D view follows; the traced
-        outline is drawn on it a moment later. This is Fusion's Create Mesh
-        Section Sketch + Fit Curves to Mesh Section, for one plane. To
-        download sketches, use the X-Ray tool.
+        outline is drawn on it a moment later (Fusion's Create Mesh Section
+        Sketch + Fit Curves to Mesh Section, for one plane).
+        <template v-if="store.params.slice_range_mm > 0">With Loft only set, this plane is also where the loft starts.</template>
+        To download this slice as a Fusion sketch, use X-Ray with start = end.
       </p>
       <SlicePlaneOptions />
       <p v-if="store.sectionBusy" class="hint">tracing…</p>
       <p v-else-if="store.sectionError" class="hint warn">Could not trace: {{ store.sectionError }}</p>
-      <p v-else-if="sectionSummary" class="hint num">{{ sectionSummary }}</p>
+      <p v-else-if="sectionSummary" class="hint num">Preview slice: {{ sectionSummary }}</p>
       <div class="row">
         <label for="slice_range">
           Loft only
@@ -101,16 +110,18 @@ const sectionSummary = computed(() => summarise(store.section?.stats, store.slic
         </select>
       </div>
       <p class="hint">
+        <span class="tag gen">used by the loft</span>
         0 lofts the whole body. A length lofts just that stretch, starting
-        at the plane above and going the chosen way, with flat ends: 20 mm
-        from the 36 mm plane going − gives a 36 → 16 mm slab. The check
-        then measures only that stretch of the mesh.
+        at the slice plane above and going the chosen way, with flat ends:
+        20 mm from the 36 mm plane going − gives a 36 → 16 mm slab. The
+        check then measures only that stretch of the mesh.
       </p>
     </div>
     <label class="check loft">
       <input type="checkbox" v-model="store.params.loft_ruled" />
       <span>
         Ruled loft
+        <span class="tag gen">used by the loft</span>
         <span class="help">Straight faces between neighbouring slices (one face per pair) instead of one smooth face per run. Exact within a hair at 0.2 mm spacing and never overshoots, but many more faces. The smooth loft is used by default and falls back to ruled on its own where a run's smooth surface comes out wrong.</span>
       </span>
     </label>
@@ -121,3 +132,7 @@ const sectionSummary = computed(() => summarise(store.section?.stats, store.slic
     <GateFields :enforced="false" />
   </section>
 </template>
+
+<style scoped>
+.previewhead { font-size: 12px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 10px; margin-top: 2px; }
+</style>

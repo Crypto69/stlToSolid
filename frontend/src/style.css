@@ -175,6 +175,14 @@ summary:focus-visible {
 }
 .params .check input { margin-top: 3px; accent-color: var(--edge); }
 .params .check .help { display: block; font-weight: 400; }
+/* which settings a button uses: "preview" (only the 3D view) vs "used by
+   the loft" (what Generate makes) */
+.params .tag {
+  display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 9px;
+  font-size: 10px; font-weight: 600; letter-spacing: 0.02em; vertical-align: 1px;
+  color: var(--muted); border: 1px solid var(--line);
+}
+.params .tag.gen { color: var(--edge); border-color: var(--edge); }
 .params .check.loft, .params .check.flat { border-top: none; padding-top: 4px; }
 .params .ax { font-weight: 700; }
 .params .ax.x { color: #e5484d; }

@@ -29,7 +29,10 @@ const axisOptions = computed(() => {
 
 <template>
   <div class="row">
-    <label for="slice_axis">Slice along</label>
+    <label for="slice_axis">
+      Slice along
+      <span v-if="store.tool === 'loft'" class="tag gen">preview + loft</span>
+    </label>
     <select id="slice_axis" v-model="store.params.slice_axis"
             :class="{ touched: store.params.slice_axis !== DEFAULT_PARAMS.slice_axis }">
       <option v-for="o in axisOptions" :key="o.key" :value="o.key">{{ o.label }}</option>

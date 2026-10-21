@@ -12,6 +12,7 @@ defineProps({ tol: { type: Boolean, default: false } })
 const store = useConvertStore()
 const isDefault = (key) => store.params[key] === DEFAULT_PARAMS[key]
 const xray = computed(() => store.tool === 'xray')
+const loft = computed(() => store.tool === 'loft')
 const join = computed({
   get: () => (xray.value ? store.xrayJoin : store.params.slice_join),
   set: (v) => { if (xray.value) store.xrayJoin = v; else store.params.slice_join = v },
@@ -47,6 +48,7 @@ const trimWarn = computed(() => !!store.inputStats?.watertight && trim.value > 0
     <label for="slice_join">
       Join gaps up to
       <span class="unit num">mm</span>
+      <span v-if="loft" class="tag gen">preview + loft</span>
     </label>
     <input
       id="slice_join" type="number" step="0.1" min="0" max="20"
@@ -64,6 +66,7 @@ const trimWarn = computed(() => !!store.inputStats?.watertight && trim.value > 0
     <label for="slice_trim">
       Trim slivers up to
       <span class="unit num">mm</span>
+      <span v-if="loft" class="tag gen">preview + loft</span>
     </label>
     <input
       id="slice_trim" type="number" step="0.1" min="0" max="5"
@@ -89,6 +92,7 @@ const trimWarn = computed(() => !!store.inputStats?.watertight && trim.value > 0
     <input type="checkbox" v-model="store.sliceOutline" />
     <span>
       Outline only
+      <span v-if="loft" class="tag">preview only</span>
       <span class="help">Draw just the outer outline: loose open pieces and inner loops (holes, islands) are left out, so the sketch is one clean profile to extrude. The summary still says how many were skipped.</span>
     </span>
   </label>

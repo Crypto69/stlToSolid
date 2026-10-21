@@ -163,6 +163,16 @@ const toolHead = computed(() => TOOL_HEAD[store.tool] || TOOL_HEAD.solid)
 const canConvert = computed(
   () => store.jobId && !store.busy && store.status !== 'uploading',
 )
+// what the button will make: for the loft, the whole body or just the
+// "Loft only" stretch from the slice plane (the single slice itself is a
+// preview and is never what gets generated)
+const convertLabel = computed(() => {
+  if (store.tool !== 'loft') return 'Convert to STEP'
+  const r = Number(store.params.slice_range_mm) || 0
+  if (!(r > 0)) return 'Loft the whole part → STEP'
+  const dir = store.params.slice_range_dir === '-' ? '−' : '+'
+  return `Loft ${r} mm from the slice plane (${dir}) → STEP`
+})
 </script>
 
 <template>
@@ -283,7 +293,7 @@ const canConvert = computed(
             {{ store.status === 'running'
                ? (store.serverStatus === 'queued' ? 'Waiting in queue…' : 'Converting…')
                : store.status === 'uploading' ? 'Uploading…'
-               : 'Convert to STEP' }}
+               : convertLabel }}
           </button>
           <button
             v-if="store.status === 'running'"
