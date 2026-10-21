@@ -40,3 +40,8 @@ frontend/dist/
 
 # Internal hand-off notes — never published
 /HANDOFF*.md
+
+# Internal plans and reviews — kept locally, not published
+/docs/SLICED-LOFT.md
+/docs/BLUEPRINT-PLAN.md
+/docs/XRAY-REVIEW-2026-10-20.md
