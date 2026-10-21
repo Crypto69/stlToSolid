@@ -1,0 +1,697 @@
+# stlToSolid: technical notes
+
+The full technical write-up: how each tool works, the API routes, settings,
+measured results and the version history. For the short version, see the
+[README](../README.md).
+
+## What it does
+
+Convert STL / OBJ (also PLY, OFF, 3MF, GLB) meshes into **prismatic STEP
+solids** — clean BREP with true planes, cylinders and cones you can sketch
+on, dimension against, and constrain — replicating the core of Fusion 360's
+paid "Prismatic" mesh conversion, plus something Fusion does not give you: an
+**editable CadQuery script** of the sketches and extrudes it recognised.
+Guaranteed output: when a mesh isn't an extrusion, the **face-group engine**
+groups it into surface regions and gives each a real plane, cylinder, cone,
+sphere or torus face (Fusion's face-group approach, in the open; a
+rolling-ball fillet around a boss or a hole mouth is one torus face); regions nothing fits
+keep their exact facets; when even that fails, the tool falls back to a
+faceted (valid, manifold, coplanar-merged, tolerance-reduced) STEP solid
+instead of failing.
+
+### Sliced loft (v0.4)
+
+For shapes that change smoothly along one axis — lens caps, handles,
+shells, bottles — and for flat plates with a fancy outline (sliced across
+their thin side), `--method loft` does what you would do by hand in Fusion
+with **Create Mesh Section Sketch → Fit Curves to Mesh Section → Loft**,
+automatically: the body is sliced along one axis every 0.2 mm (default),
+every section outline is redrawn as a closed B-spline, and the stack is
+lofted into **one smooth face per run of sections**. Runs break at flat
+faces across the axis (a shoulder stays a real planar face, not a smear)
+and where the outline count changes; holes along the axis are lofted and
+cut; a dome tip gets a short cone to the apex. The result is written
+whenever it can be built — you chose the method — and the acceptance gate
+is reported for information. Alongside the STEP comes `<out>_fusion.py`,
+which repeats the workflow as a Fusion timeline: one sketch per section
+(closed fitted splines on offset planes) and one Loft per run, holes as
+Loft cuts.
+
+Not for machined parts with slots, sideways holes and steps: a hole
+drilled *across* the slicing axis becomes a trough, because no slice sees
+it as a circle, and sharp corners *around* an outline are followed within
+the spline tolerance (0.02 mm) but are not sharp edges. Mesh → Solid
+does those parts with true planes and cylinders (the servo bracket sample:
+2 s, one solid, 0.06 mm); the report says so when a part looks prismatic.
+
+What the loft does on its own (v0.4.6): `auto` picks the axis by slicing
+structure, not the longest side — a round cap is longest across its face
+but wants its short axis (the body-cap sample: 10 minutes and 707 loose
+solids along X, 22 s and one solid along Z), a 4 mm plate wants its thin
+axis; the report says which axis and why. Outlines the shared spline
+basis cannot fit (cornered sections) are lofted ruled straight away, and
+identical sections collapse to one straight stretch, so a prism is one
+face per side. A run whose rings do not correspond is lofted pair by pair
+instead of being dropped, a pair that still fails is extruded straight,
+and the report lists every run, hole or pair it had to give up on, and
+whether the pieces fused to one solid.
+
+`stl_to_solid/section_fit.py` holds the shared plane cutter and the curve
+fitter (lines and arcs where they hold the tolerance, fitted splines where
+they do not) — numpy only, so the same file can run inside Fusion.
+`tools/trace_section.py` draws one section the way the fitter sees it.
+
+**Single slice from the web app.** With Sliced Loft or X-Ray chosen in
+the top toolbar, the 3D view shows a labelled XYZ triad (X red, Y green,
+Z blue, as in Fusion) and a translucent plane across the chosen axis; a
+slider moves the plane by an offset from the part's centre and the traced
+outline is drawn on it (`GET /api/jobs/{id}/section`; `/section-script`
+gives that one sketch as a Fusion script). In X-Ray, start = end is the
+single slice and its download.
+A leaky mesh (loose surface patches, a scan) cuts into open chains as well
+as closed loops; they are drawn open, exactly as Fusion's mesh section
+draws them, after loose ends closer than "Join gaps up to" (default
+2.5 mm, `join=`) have been joined, so an outline broken only by hairline
+cracks between patches comes back as one closed profile. 0 joins
+nothing. "Outline only" (`outline=true`) draws just the outer outline,
+leaving the open pieces and every inner loop out, for one clean profile
+to extrude; "Trim slivers up to"
+(`trim=`) cuts hairpins and thin twists narrower than that out of the
+loops, where the mesh has a double skin. A loop that is thin all over (a
+1.3 mm wall beside a cross hole with the trim at 1.5) is a feature and is
+left whole (0.4.7; it used to come back as a stub), and the panel warns
+when the mesh is watertight, since such a mesh has no double skin to
+trim. The X-Ray keeps its own gap and trim values, so a trim set for a
+leaky loft does not carry into the next part's X-Ray.
+
+**X-Ray (v0.4.5).** The X-Ray tool draws a whole stack of those sketches
+between two planes: pick the axis, a start plane, an end plane and a
+spacing, and the slices are traced one after another, each one staying in
+the 3D view as it appears, so the stack shows up slice by slice like an
+x-ray between the two planes (start solid, end dashed, marked S and E).
+"Download Fusion sketches" builds one script with a fully enclosed sketch
+per slice on its own construction plane, named `xray Z=12.34 mm (k/N)`
+(`GET /api/jobs/{id}/xray-script?axis&from&to&step&tol&units&scale&join&
+outline&trim&extrude`, and `/xray` for the count and plane positions). The
+planes sit at start + k·spacing and the end plane is always the last one;
+both ends are kept 0.001 mm inside the part so no plane lands exactly on
+a flat end face. The script embeds the slice data once and draws it in a
+loop with each sketch's compute deferred, behind a progress dialog with
+Cancel — the same approach as the private Fusion add-in — so a
+hundred-sketch stack opens in seconds. "Extrude each slice to the next"
+(`extrude=true`) also extrudes every sketch up to the next plane and joins
+it to the slabs before it (a new body where nothing touches, which the
+next slab then joins: Fusion does not fail a Join that meets nothing, it
+quietly makes a new body, and until 0.4.7 that body was never joined
+again, so one arm of a bracket came out as a stack of loose slabs),
+giving a stepped solid that Fusion builds without fail where a Loft
+between two complex profiles folds over. Only the material profiles are
+extruded: each section carries its loops' areas (outer minus holes) and
+the script skips the hole interiors Fusion also lists as profiles, so a
+hole along the axis stays open when its loop is drawn (Outline only
+leaves hole loops out and so fills them). The last slab is one spacing
+long but stops at the part's far face, and an end plane closer than half
+a spacing to the slice before it is drawn only, that slice's slab running
+through, so no hair-thin slab is made. One download fits at most 500 slices and
+spends at most 240 s fitting (`STLTOSOLID_XRAY_BUDGET`); the panel
+estimates the build time from the traces so far and suggests Outline
+only, which is about five times faster on organic sections (the fit is
+the cost, not the cut: 8 ms a slice on a clean CAD bracket, 6 s on a
+158k-triangle controller scan).
+
+The sliced loft's cutter uses the same join and trim settings
+(`--slice-join`, `--slice-trim`), so a leaky shell lofts from the same
+outlines the slice view shows. "Loft only N mm from this plane" (`--slice-from`,
+`--slice-range`, `--slice-dir`) lofts just a stretch of the body, starting
+at the slider's plane, with flat ends; the check then measures only that
+stretch of the mesh.
+
+### Blueprint (v0.5)
+
+The fourth tool starts from a picture, not a mesh: drop or paste a
+dimensioned drawing (front / top / side views with their labels, like a
+servo's datasheet drawing) and get back a parametric Fusion 360 script,
+a STEP and a 3D preview. A vision model of your choice reads the labels
+into a small **recipe**: named parameters in mm (`body_w = 22.5`,
+`hole_d = 2.0`) and a short list of features, each one sketch plane (XY =
+top view, XZ = front, YZ = right side, at an offset along its normal),
+one or more shapes on it (rectangle, circle, slot, polygon) and one
+extrude (new body / join / cut, a distance or through-all). Numbers may be
+expressions over the parameters (`body_w/2`). Every number is shown in a
+table with where it came from; values the model had to deduce are marked.
+Fix a misread one and the view redraws within a second (a warm helper
+process keeps the geometry kernel loaded; the shape only, no files); press
+**Rebuild** for the STEP and the script, again without asking the model.
+The 3D view is coloured by feature, the same colours as the swatches in
+the feature list, and hovering a feature lights it up in the view, so
+which number moves what is plain to see.
+
+Before anything is built the recipe goes through deterministic checks:
+every expression resolves, shapes have size, the first feature is a body,
+a cut removes something, a join touches something, no shape is nested
+inside another in one sketch, and the built bounding box matches the
+drawing's overall size (an error beyond ±3 %, a warning beyond ±1.5 %,
+with a hint when two axes are off because a view was mapped to the wrong
+plane). A recipe that fails a check is sent back to the model once with
+the list; what still fails is shown in the table for you to fix.
+
+The same recipe is built twice from one source: CadQuery makes the STEP
+and the preview the web viewer shows, and the Fusion script
+(`output_fusion.py`, run from Scripts and Add-Ins in a new parametric
+design) makes **User Parameters** for every recipe parameter, one sketch
+per feature with driving dimensions bound to those parameters
+(`body_w / 2`), and an Extrude per feature. Change `body_h` in Modify →
+Change Parameters and the boss on top moves with it. The X-Ray script's
+plumbing is reused: data literals plus a fixed runtime, a progress
+dialog, profiles picked by their expected area so holes stay open.
+
+**Providers and keys.** The panel offers Anthropic (Claude, the default),
+OpenAI, DeepSeek and a *Custom* OpenAI-compatible URL (Ollama with a
+vision model keeps the drawing on your own machine; OpenRouter works
+too). Model names are editable. Your key is kept in the browser's local
+storage and sent with each read as a header; the server uses it for
+that one call and never writes it to disk or a log. With no key in the
+browser the server's own `STLTOSOLID_<PROVIDER>_API_KEY` is used when
+set — an opt-in for a private install, since anyone who can reach the
+app could spend it. DeepSeek: only `deepseek-flash` reads images, so it
+is the only DeepSeek model offered (`deepseek-v4-pro` takes none and is
+refused). It gets thinking switched on explicitly and JSON mode (`json_object`, the schema in the
+prompt, since DeepSeek has no `json_schema`); Effort low / medium / high
+maps to DeepSeek's low / high / max, and the image goes at detail
+`original` (full resolution). Adding a provider is one `register()`
+call in `stl_to_solid/blueprint/providers.py` (label, adapter, default
+model, endpoint); an OpenAI-compatible one reuses its adapter, and a new
+API style is one `Provider` subclass (`complete` + `list_models`). The
+server key is then `STLTOSOLID_<KEY>_API_KEY` and the panel lists it
+with no frontend change. The drawing is sent to the provider
+you pick and nowhere else.
+
+Routes: `POST /api/blueprints` (the image; .jpg, .png or .webp, up to
+`STLTOSOLID_MAX_IMAGE`), `GET /api/blueprints/config` (providers and
+whether the server holds a key for each), `POST
+/api/blueprints/{id}/read` (`{provider, model?, base_url?, hints?}` with
+the key in `X-Api-Key`; the job goes `reading` → `queued` → `running` →
+`done`), `POST /api/blueprints/{id}/build` (`{recipe}`, no model call; a
+400 lists what the checks refused), `GET /api/blueprints/{id}/recipe`
+and `/drawing`; then the usual `/api/jobs/{id}`, `/download`,
+`/fusion-script` and `/preview`; `POST /api/blueprints/{id}/preview`
+(`{recipe}`) is the live look (the mesh at `/live.stl`, one feature index
+per triangle in the answer) and `GET /api/blueprints/{id}/preview-map`
+the same colouring for the full build. Install the reader's dependencies with
+`pip install -e '.[blueprint]'` (the Docker image has them).
+
+## Screenshots
+
+The web app: drop a mesh, inspect it, pick a tool, set the acceptance gate,
+convert, and read the fidelity report before downloading the STEP (and, for
+extrusions, the CadQuery / Fusion 360 scripts). (Screenshots predate the
+v0.4.5 toolbar.)
+
+| | |
+|---|---|
+| ![Mesh loaded, acceptance gate and options](img/ui-loaded.png) *Mesh loaded; units, acceptance gate, face-group engine toggle.* | ![Prismatic result](img/ui-servo-prismatic.png) *Servo bracket → prismatic solid: 1,644 triangles → 23 faces (15 planes, 8 cylinders), max deviation 0.060 mm, every gate passed, STEP + scripts offered.* |
+| ![Face-group result: frame](img/ui-frame-facegroup.png) *Frame (countersinks, multi-direction material) → face-group solid: 4,200 triangles → 101 faces (v0.3.3), 9 cylinders + 7 cones, max deviation 0.040 mm.* | ![Face-group result: joystick claw](img/ui-claw-facegroup.png) *Joystick claw → face-group solid: 1,902 triangles → 250 faces incl. 43 cylinders and 20 spheres.* |
+
+### Compared with Fusion 360's Mesh to Solid
+
+The same `servo_bracket_1.stl`, opened in Fusion 360 three ways. Left:
+Fusion's own *Mesh → Solid* (the free tier's faceted conversion — every
+triangle becomes a face). Middle: the STL mesh as loaded. Right: the STEP
+from stl_to_solid — 23 faces, planes and cylinders, holes that are real holes.
+
+![Fusion Mesh to Solid (left), the STL mesh (middle) and the stlToSolid STEP (right)](img/side-by-side.png)
+
+| | |
+|---|---|
+| ![Fusion Mesh to Solid, zoomed](img/fusion-mesh-solid.png) *Fusion Mesh → Solid, zoomed in: one face per triangle, so the "solid" carries all 1,644 facets and cannot be sketched on, filleted or measured like a modelled part.* | ![stlToSolid STEP, zoomed](img/Stl-prism-zoom.png) *stlToSolid output, zoomed in: flat faces are single planes, the blend is one cylinder, the edges are where the design has them.* |
+
+## Install
+
+```bash
+pip install .            # core
+pip install .[scan]      # + pymeshlab, for 3D-scan repair (Poisson; Linux x86_64)
+```
+
+## Usage
+
+```bash
+stltosolid part.stl                 # -> part.step  (+ part.py CadQuery script)
+stltosolid part.obj --units cm      # file is in cm (Fusion's OBJ default); scale to mm
+stltosolid part.stl out.step --tol 0.05 --accept-max 0.3 --accept-vol-pct 3
+stltosolid scan.stl --reduce-tol 0.1     # faceted output: simplify curved regions within 0.1 mm
+stltosolid scan.stl --force-prismatic    # attempt prismatic on scan input
+stltosolid part.stl --no-face-groups     # skip the face-group engine (prismatic -> faceted only)
+stltosolid shell.stl --method loft       # sliced loft: sections every 0.2 mm along the longest axis, smooth loft
+stltosolid shell.stl --method loft --slice-mm 0.5 --slice-axis z --loft-ruled
+stltosolid big.stl --scale 0.1           # a cm design exported as mm: shrink by ten
+```
+
+Or from Python:
+
+```python
+from stl_to_solid import run
+result = run("part.stl", "part.step")
+print(result["mode"], result["metrics"], result["script"])   # 'prismatic' | 'facegroup' | 'faceted' | 'loft' | 'mixed'
+result = run("shell.stl", "shell.step", method="loft", slice_mm=0.2, slice_axis="auto")
+print(result["metrics"]["loft"], result["fusion_script"])     # sections, runs, holes; the Fusion loft script
+```
+
+Exit code 0 on success. The log reports which route produced the output
+(`prismatic`, `facegroup` or `faceted`) and the measured fidelity (surface
+deviation both ways, bore deviation, volume error) of prismatic and
+face-group results.
+
+Outputs next to the STEP: for prismatic results `<out>.py` (CadQuery) and
+`<out>_fusion.py` (Fusion 360 sketches + extrudes — verified: a fully
+parametric timeline you can edit); for sliced-loft results
+`<out>_fusion.py` (section sketches + Loft features, not yet run inside
+Fusion); for face-group results
+`<out>_fusion_bfill.py` — an **experimental Fusion 360 Boundary Fill
+script**. It recreates every fitted plane, cylinder, cone, sphere and torus
+slightly oversized as a temporary body, runs Boundary Fill, and keeps the
+cells that lie inside the original mesh (the mesh travels inside the
+script). Fusion's own kernel then computes the exact edges between the
+faces, so the solid comes out without the polyline edges of the STEP.
+
+To run either script in Fusion: put the `.py` in an empty folder of its
+own, then Utilities → Add-Ins → Scripts and Add-Ins → **+** → choose that
+folder → Run. Progress appears in the Text Commands panel (View → Show
+Text Commands).
+
+Boundary Fill status: verified on parts the engine fits cleanly (planes,
+cylinders, cones, spheres, fillets, holes — exact face counts). Torus blends
+(fillets around curved edges) are one torus tool each; an apex cone (a
+pencil tip) is one solid cone tool; a tapered / variable-radius fillet kept
+as bands in the STEP becomes a single approximate torus or cone tool per
+chain (tangent band chains defeat the cell computation). The printed
+outlook is an OCC dry run of the actual script — the tools are rebuilt,
+the cells computed and the enclosed volume measured — so OK / LIKELY TO
+FAIL reflects the arrangement itself, not a guess. Still fails on bodies
+whose gently curved plates segment into near-parallel plane strips (the
+frame — see Roadmap). Bodies with more than 200 regions get no script;
+`EXPAND` at the top of the script sets the oversize (1 mm by default).
+
+## Web app
+
+A browser UI for the same pipeline: drag a mesh in, inspect it in 3D, pick
+a tool in the top toolbar, set the tolerances, and download the result.
+The toolbar (v0.4.5) starts with **New project** (load another file) and
+then one button per tool (four since v0.5, Blueprint being the one that
+takes a picture); the panel on the right shows that tool's name
+as a cyan heading and only its controls, over the shared setup (which
+bodies to use, input units and scale, the mesh's stats).
+
+- **Mesh → Solid.** The auto ladder: prismatic fit, then face groups,
+  then faceted, held to the acceptance gate you set. Convert, read the
+  fidelity report (route, surface deviation vs. your limits, volume error,
+  face counts and surface types, regions kept as facets), download the
+  STEP and, for prismatic results, the CadQuery and Fusion 360 scripts.
+- **Sliced Loft.** Slice spacing and axis, a single-slice plane you can
+  drag through the part with its traced outline, gap joining, sliver
+  trimming, outline-only, a partial loft from that plane, ruled or smooth.
+  Convert gives the lofted STEP and the Fusion loft script.
+- **Blueprint.** Drop or paste a dimensioned drawing (the stage shows it,
+  with a *Drawing | 3D* switch once the part is built); pick the vision
+  model and paste your key (kept in this browser); optional notes for the
+  reader; **Read drawing** shows *Reading the drawing…* then *Building…*
+  (Cancel works in both); the parameters table and the feature list with
+  every number editable, inferred and low-confidence ones marked;
+  **Rebuild** after an edit; the size against the drawing's, the volume,
+  who read it and what it cost in tokens; downloads of the parametric
+  Fusion script and the STEP. Edits redraw the coloured shape live; the
+  feature list's swatches match the view and hovering a row lights it up.
+- **X-Ray.** Axis, start plane, end plane, spacing (or *Whole part*); the
+  slice count and a time estimate; the slices traced one by one and left
+  in the 3D view (a *stop* link halts the trace, *trace the rest* resumes
+  it); the same fit options as the single slice plus the fit tolerance;
+  *Extrude each slice to the next* for solid slabs; and **Download Fusion
+  sketches**, which shows *Working…* with a spinner while the server fits
+  every slice and hands you the .py when it is ready. To run it: put the
+  file in an empty folder, then in Fusion Utilities → Add-Ins → Scripts and
+  Add-Ins → + → choose that folder → Run.
+
+The ViewCube sits top-right as in Fusion; every button visibly presses;
+loading a file, converting and building a script all show a spinner with
+what is being waited for.
+
+### Run locally (dev)
+
+```bash
+python -m venv .venv && .venv/bin/pip install -e . fastapi 'uvicorn[standard]' python-multipart
+.venv/bin/uvicorn backend.main:app --port 8000     # API
+cd frontend && npm install && npm run dev           # UI on :5173, proxies /api
+```
+
+### Run as a container
+
+```bash
+docker compose up --build        # then open http://localhost:8321
+./deploy.sh                      # same, but stamps the image with the git commit,
+                                 # shown top-right in the UI and at /api/version
+```
+
+To run it on a home NAS (any x86_64 box with Docker: clone on the NAS, build
+natively, optional Tailscale HTTPS front), follow
+[docs/DEPLOY-NAS.md](DEPLOY-NAS.md).
+
+Environment knobs: `STLTOSOLID_DATA` (job storage dir, default `/data` in
+the container), `STLTOSOLID_JOB_TTL` (seconds before old jobs are purged,
+default 86400), `STLTOSOLID_MAX_UPLOAD` (bytes, default 200 MB),
+`STLTOSOLID_WORKERS` (shells converted at once in worker processes, default
+half the cores; 0 converts in-process, as does any file under 20k faces
+when the count is not set explicitly), `STLTOSOLID_SHELL_TIMEOUT` (seconds
+a shell may run in a worker before it is built faceted instead, default
+900; 0 means no limit), `STLTOSOLID_AXIS_BUDGET` (seconds one shell's extrusion-axis search may
+take before the best candidate so far is used, default 120; 0 means no
+limit), `STLTOSOLID_XRAY_BUDGET` (seconds one X-Ray script download may
+spend fitting its slices before it answers 400, default 240 — under a
+browser's 300 s response limit), `STLTOSOLID_ANTHROPIC_API_KEY` /
+`STLTOSOLID_OPENAI_API_KEY` / `STLTOSOLID_DEEPSEEK_API_KEY` (Blueprint's
+opt-in server-side keys), `STLTOSOLID_BLUEPRINT_TIMEOUT` (seconds one
+read of a drawing may take, default 300, and 1200 for DeepSeek, whose max
+effort thinks for several minutes; when set it applies to every provider), `STLTOSOLID_MAX_IMAGE` (bytes,
+default 20 MB), `STLTOSOLID_PREVIEW_TIMEOUT` (seconds one live preview
+may take in the helper before it is killed and restarted, default 45).
+The budgets are backstops: a shell that reaches one is scored on
+what was done by then, so its result can depend on machine load. The CLI
+takes the first two as `--workers` and `--shell-timeout`. The same workers
+score a big single shell's axis candidates side by side and run the
+Boundary Fill dry run two bodies at a time; the log ends with a `[time]`
+line giving the wall clock per stage (conversion, STEP write, scripts and
+dry run).
+
+## How it works
+
+The pipeline implements the classical reverse-engineering architecture
+(segmentation -> primitive fitting -> constraint solving -> rebuild), using
+the *extrusion-cylinder* decomposition strategy rather than free surface
+stitching — which sidesteps the brittle face-intersection/topology problem
+that makes general mesh-to-BREP hard — extended with lofts, cross-axis
+features and local patching so that one axis need not explain everything.
+
+1. **Prep** (`mesh_prep`) — load, weld, repair. Vertices closer than 1e-6 of
+   the bounding box are welded (exporters leave micron cracks that split a
+   part), duplicate/degenerate faces dropped, OBJ per-corner normals/UVs
+   merged away. Units (`--units mm|cm|in|ft|m`) scale the mesh on load; the UI
+   suggests a unit from the bounding box. Connected shells are split into
+   bodies; a shell *inside* another is an internal cavity and is attached to
+   its body as a void, so a hollow part becomes one hollow solid (the
+   cavity goes in as an inner shell of the solid, not a boolean). Scan-like
+   input (dense, low dihedral, no exactly-coplanar facets) is rebuilt via the
+   pymeshlab repair ladder and decimated with topology preservation.
+2. **Axis discovery** (`extrusion`) — face normals are clustered on the
+   Gaussian sphere; each candidate axis is offered raw *and* snapped to
+   global XYZ (when within 5°) and *scored* by the volume fraction of the
+   part that has a constant (or linearly varying) cross-section along it,
+   with the perpendicular-face area as a tie-breaker. Snapping is a
+   hypothesis, not a decision: a part tilted 3° keeps its true axis.
+3. **Slab decomposition** — planar faces perpendicular to the axis vote for
+   height levels; each slab is cross-sectioned at several heights *and* just
+   inside its ends. Where the section starts or stops changing (a chamfer,
+   countersink or boss top) or its topology changes, a level is inserted by
+   bisection and snapped to a mesh-vertex height. Constancy compares section
+   *shapes* (IoU + boundary distance), not just areas.
+4. **Profile fitting** (`profile_fit`) — each polygon ring is segmented into
+   **lines and circular arcs**: recursive split (at real corners first),
+   Taubin circle fits with deviation measured against the whole polyline
+   (chord interiors included, so a big circle through the ends of a straight
+   wall cannot pass), a cyclic merge pass, boundary refinement between
+   neighbours, arc radii/centres re-fitted on the mesh vertices (which lie
+   exactly on the CAD surface — section vertices sit on chords), and
+   junction solving: line/line at their intersection, tangent line/arc
+   fillets solved exactly, lines squared to the dominant frame.
+5. **Constraint snapping** (GlobFit-lite, `rebuild._global_snap`) — radii and
+   centres are clustered *globally across all slabs* and snapped to cluster
+   means. This turns facet-noise families like r = 5.242..5.257 into a
+   single design radius.
+6. **Rebuild** (`rebuild`) — constant slabs are extruded; slabs whose section
+   varies linearly (drafts, chamfers, countersinks, tapered ribs) are
+   **lofted with analytic faces** — planes between matched lines, cones /
+   cylinders between matched arcs and circles. Equal consecutive slabs are
+   merged, Booleans use a fuzzy tolerance, and a finishing pass drops
+   micro-edges, unifies same-domain faces and checks validity.
+7. **Cross-axis features** (`features`) — curved facet regions are split
+   into coaxial primitives and classified: **cylinders** (bores not parallel
+   to the main axis, radius/axis refined by least squares on the vertices,
+   blind ends kept blind) and **cones** (countersinks, chamfered hole
+   mouths) are subtracted as analytic features.
+8. **Validate + gate** (`pipeline`) — deterministic, *symmetric* deviation
+   (mesh → solid on area-uniform samples plus every vertex; solid → mesh),
+   bore deviation, volume error. Passing → prismatic. Failing → the next
+   rungs, each held to the same gate:
+   * **Face-group engine** (`facegroups`) — the mesh's coplanar components
+     are seeds for a greedy, fit-driven region growing (never across a
+     dihedral > 25°): a region grows while a plane / cylinder / cone / sphere
+     (simplest first) explains its **vertices** within a few microns and its
+     facet interiors within the fit tolerance — the second test is what stops
+     a wide plane and its first fillet strip from being fitted by an exact,
+     absurdly large cylinder. A rolling-ball blend around a curved edge (a
+     boss-base fillet, a filleted hole mouth) comes out of growth as a chain
+     of short cylinder bands whose axes are all tangents of one circle; the
+     engine then fits a **torus** to each such chain (seeded from the bands'
+     own axes) and absorbs every neighbour it explains. Directions, coaxial
+     axes, coplanar offsets and equal radii are then snapped within
+     measurement uncertainty (reverted
+     if a snap moves a surface off its vertices), and every region becomes
+     one trimmed face on its fitted surface: boundary polylines projected
+     onto the surface (a shared vertex table keeps both sides of every edge
+     identical for sewing), `MakeFace` + `ShapeFix_Face`, seams placed
+     through boundary vertices. Regions no primitive fits, or whose face
+     will not build, keep their exact facets. Sew → largest solid → heal →
+     check → gate. Mode `facegroup`; no sketch/extrude script for it.
+   * **Hybrid patch** (`hybrid`): the prismatic solid with its deviating
+     regions boxed and replaced by the exact faceted geometry,
+     `(P − B) ∪ (F ∩ B)`, re-checked. Keeps the script.
+   * **Faceted** route: coplanar triangles merged into single planar faces
+     *before* sewing, curved regions decimated within `--reduce-tol`, sewn
+     into a manifold solid.
+9. **Export** — one STEP (AP214) with **named bodies and faces coloured by
+   surface type**, plus a **CadQuery script** (`<out>.py`) that rebuilds the
+   recognised sketches, extrudes, lofts and feature cuts with named
+   parameters (radii `R_n`, heights `H_n`) — edit a value, re-run, get a new
+   STEP.
+
+### Research basis
+
+The architecture follows the standard two-phase scan-to-BREP paradigm
+(segmentation + fitting) established by Schnabel et al.'s Efficient RANSAC
+(2007) and surveyed in recent literature; the extrusion-cylinder
+decomposition is the classical analogue of Point2Cyl (CVPR 2022) / PrismCAD;
+global constraint snapping follows GlobFit (Li et al.); validation-gated
+output with honest fallback and local patching is our own addition.
+
+## Measured results (v0.3)
+
+Default gates (fit tol 0.08 mm, p95 ≤ 0.25, max ≤ 0.26, bore ≤ 0.10 mm,
+volume ≤ 2 %). "faces" = ADVANCED_FACE count in the STEP.
+
+| part | triangles | mode | faces | max dev | vol err |
+|---|---|---|---|---|---|
+| servo_bracket_1 | 1,644 | prismatic | 23 (was 60) | 0.060 mm | 0.08 % |
+| servo_bracket_2 | 1,712 | prismatic | 19 (was 28) | 0.044 mm | 0.06 % |
+| top_arm_1 | 3,896 | prismatic (chamfered bosses as cones) | 44 (was 1,245 faceted) | 0.050 mm | 0.00 % |
+| top_arm_2 | 3,816 | prismatic | 40 (was 1,213 faceted) | 0.050 mm | 0.05 % |
+| joystick_claw_1 | 2,134 | face-group (27 cyl, 5 spheres, 8 cones, 5 tori) | 153 (was 495 in v0.3.3, 671 patched) | 0.019 mm | 0.07 % |
+| joystick_claw_2 | 1,902 | face-group (17 cyl, 12 spheres, 13 cones, 5 tori) | 208 (was 226 in v0.3.2, 341 faceted) | 0.047 mm | 0.04 % |
+| frame | 4,200 | face-group (9 cyl, 7 cones) | 101 (was 160 in v0.3.2, 516 faceted) | 0.040 mm | 0.03 % |
+| Mesh_90p (scan) | 2.17 M | faceted (scan route) | 39,575 | — | 0.00 % |
+
+The remaining planar faces on the face-group parts are blends (tapered
+corner fillets, free-form) that v1 keeps as exact facets.
+
+v0.3.9 (pick the bodies to convert): a file's connected bodies are listed
+on upload and drawn in the viewer, each in its own colour, and clicking
+one selects it. Only the ticked bodies are converted. A 68-body
+controller where two housing halves were wanted took 18 minutes to
+convert all 71 solids; the two take about 10. The default ticks every
+body down to 5% of the largest, which is the housing halves and none of
+the 70 screws. The selection travels as a shell identity (face count,
+proportions, position and size as fractions of the file), not an index:
+preparation folds cavities into their parent body, so the list the UI
+shows and the list the pipeline converts diverge, and an index would
+silently select the wrong part. A mesh whose size is implausible for a
+part is flagged before conversion rather than after — that controller
+reads 1499 mm across, ten times too big, which no input unit corrects.
+
+v0.3.8 (cavities as inner shells): a body's cavities are added to its
+solid as inner shells, the way OCC and STEP represent a hollow solid,
+instead of being subtracted with a fuzzy boolean. The cut had the kernel
+compare every outer face with every cavity face: on the 68-body
+controller's hollow body (a 15.8k-face outer, two cavities of 20k and 6k
+faces) that took 77 minutes and returned an empty solid. The inner shell
+takes milliseconds, keeps every fitted face as it was, and the volume is
+outer minus cavities exactly. A cavity that touches or pokes through the
+wall after fitting, or sits inside another, still takes the boolean
+(`void_method` in the metrics says which route a body took, and why).
+The nesting that finds cavities now checks every vertex of an inner
+shell, not one: a shell that crosses its container's surface (that
+controller's two "cavities" reached 29 mm and 3.7 mm outside the body)
+is an overlapping part, not a cavity, and is kept as a solid of its own
+with a `[bodies]` line saying so.
+
+v0.3.7 (shells in parallel): a file's shells (each body's outer surface
+and each cavity) are converted side by side in spawned worker processes,
+largest first, and each body reassembled afterwards exactly as before: the
+same STEP, per-solid faces and volumes, with one worker or four. A shell
+past its wall clock (`STLTOSOLID_SHELL_TIMEOUT`, 900 s) or whose worker
+died under it (an OCC crash costs that shell, not the job) is built
+faceted in the pool on a shorter clock and says so in its metrics
+(`timed_out`, `shell_error`). The pool is one per run: its workers start
+on first use and serve the shells, a big single shell's axis candidates
+(scored side by side from 20k faces) and the Boundary Fill dry run (two
+bodies at a time, each and all under the 120 s budget). Small files stay
+in-process, where a worker's start-up would outlast the conversion. The
+log carries one block per shell as it finishes, `[progress] k/n shells`,
+and a closing `[time]` line per stage. On the 68-body controller (72
+shells) four workers convert every shell in about 18 minutes; the file
+previously never finished. Knobs: `STLTOSOLID_WORKERS`,
+`STLTOSOLID_SHELL_TIMEOUT`, `--workers`, `--shell-timeout`; the NAS runs
+two workers.
+
+v0.3.6 (the extrusion search made finite): a 12k-face textured cavity in
+a 68-body controller offered 772 perpendicular levels on one axis and kept
+the level refinement busy for 41 minutes; the same shell's axis search now
+takes about 27 s. A candidate with more than 120 levels is not an
+extrusion and scores 0 unsectioned; every slab's probe heights are cut in
+one pass and slabs are cached by height, so a refinement round sections
+only the two slabs a new level made; a slab's bisections are done once,
+not once per round; bisection probes chain their own loops (trimesh's path
+machinery was the cost on sections of hundreds of tiny loops) over just the
+faces that span the slab; the same-section test runs its cheap parts
+first; candidate scoring stops once no remaining candidate can win; and a
+budget (`STLTOSOLID_AXIS_BUDGET`, 120 s per shell) backstops the whole
+search — past it the best candidate so far is used, or the shell goes to
+the face-group route. The sample STEPs are unchanged.
+
+v0.3.5 (the dry run made honest and fast): the OCC dry run behind the
+Boundary Fill outlook now builds exactly the tools the script builds — the
+script's own arc growth is executed from its text (the emulation had grown
+arcs by at most 30° where Fusion grows by up to 180° and closes near-full
+arcs into circles), a cone tool's two ends share one angular window, the
+SKIP list is honoured, unbuildable tools are skipped and counted, and cells
+are classified by the same procedure as the runtime (probe point, interior
+point, face probe for slivers, closest-volume fallback). It is ~50× faster
+(one classifier per cell behind a bounding-box test: claw_1's conversion
+270 s → 36 s) and judges every body on its own — a region none of whose
+probe points lies in a cell, or a body the script had to leave out, is a
+FAIL; a kernel error or a body past the time budget is "not checked"
+rather than a guess; the script's own header carries the same verdict as
+the UI. Also: merged tapered-fillet cones are snapped to their tangent
+planes; pieces of one torus/sphere/cone fit (pinch repair) become one tool
+instead of two coincident ones; blend chains are walked in chain order; the
+segmenter's acceptance test and seeders are shared with the blend merge;
+region ids in the script's log carry the engine ids they were made from
+(`12<3,4,5>`). claw_1's dry run: 101.2 % enclosed, OK.
+
+v0.3.4 (pinched boundaries, blend tools, real Boundary Fill outlook): a
+region whose boundary pinches (an annulus whose hole touches the rim at one
+vertex) is repaired by peeling the faces at the pinch instead of falling to
+triangles — joystick_claw_1's biggest plane was one such region, 290
+triangles for what is now 3 planar faces (claw_1: 495 → 153). Regions that
+still get no analytic face are emitted as one planar face per coplanar
+facet group instead of raw triangles. For the Boundary Fill script only,
+chains of tangent blend bands (tapered / variable-radius fillets) are
+merged into single approximate torus or cone tools — a G1 chain of tangent
+bands defeats the kernel's cell computation, and a cutting tool only has to
+stay within the fit tolerance; the STEP keeps the exact bands. The Boundary
+Fill outlook is now an OCC dry run of the actual script (build the tools,
+compute the cells, measure the enclosed volume) instead of a heuristic:
+claw_1 gets its first OK (cells enclose 100.3 % of the mesh).
+
+v0.3.3 (apex and tapered cones): a pointed cone is one conical face closed
+at the tip by a degenerate edge (a pencil part: 1 plane + 1 cylinder +
+1 cone), and a tapered pin is a few cones instead of dozens of short
+cylinder bands — the cone seeding now centres the axis with a per-slab
+circle fit (a sector of a real cone used to be rejected before the
+least-squares fit ever ran), and a post-growth cone-chain merge joins
+near-coaxial bands, cone sectors and ring-like "sphere" bands (any two
+vertex rings lie exactly on some sphere) into single cones. The frame
+dropped 160 → 101 faces, the claws to 495 / 208. The Boundary Fill script
+emits an apex-reaching cone as one solid cone tool.
+
+v0.3.2 (torus fits): a rolling-ball blend around a curved edge is one torus
+face instead of a chain of short cylinder bands (boss-base fillet: 82 → 9
+faces; filleted hole mouth: 8 faces; the joystick claws lost 39 and 24
+faces). The band chains are found after region growing and the torus is
+seeded from the bands' own axes (every band axis is a tangent of the blend's
+centre circle), so parts without such chains are untouched. The Boundary
+Fill script emits one `createTorus` tool per blend.
+
+v0.3.1 (profile-fit fidelity): the prismatic profile fitter no longer lets
+one circle absorb an exactly straight wall next to a gentle arc (a flat
+mesh face used to come out as an r = 50–200 mm cylinder, a different one
+per slab), walls and arcs are unified across slabs (no more micron-wide
+seam faces on flat faces), and a perpendicular face under 0.25 mm from its
+neighbour is a level of its own when it is not edge-connected to it (a
+0.15 mm ledge used to be merged away). servo_bracket_1 went 60 → 23 faces
+with the same deviation.
+
+Synthetic CAD parts (see `tests/test_matrix.py`, `tests/test_facegroups.py`):
+plates with holes/fillets, obround slots, hex pockets, stepped shafts, cross
+and blind holes, hollow parts, drafted blocks, chamfers, countersinks, small
+interior steps, tilted and rotated parts, tiny (3 mm) and huge (1.5 m) parts
+convert to the exact face count with sub-0.1 mm deviation on the prismatic
+route; a sphere boss (6 planes + 1 sphere), a top-edge-filleted box (6
+planes + 4 cylinders), a plate with a spherical dimple, an icosphere (one
+spherical face), a boss with a filleted base (7 planes + 1 cylinder + 1
+torus) and a plate with a filleted hole mouth (6 + 1 + 1 torus) come out
+exact through the face-group engine.
+
+## Limitations (v0.3)
+
+* The **CadQuery / Fusion sketch script** only exists for prismatic results
+  (the extrusion engine is the only route that yields sketch + extrude
+  structure); face-group results get the Boundary Fill script instead, which
+  works only on cleanly fitted parts (see Usage).
+* The face-group engine fits **planes, cylinders, cones (apex cones and
+  tapered pins included), spheres and tori** (constant-radius rolling-ball
+  blends around curved edges); variable-radius corner fillets and free-form
+  blends keep their exact facets or stay as short cylinder bands, and a
+  torus is only found where the blend spans at least three such bands
+  (about 10° of the ring). A gently curved taper is approximated by a few
+  cones, as many as the fit tolerance needs. It targets CAD exports
+  (coplanar facet pairs); scans stay on the faceted route. Face edges are
+  the projected mesh polylines (chords), not surface–surface intersection
+  curves yet.
+* Scan input defaults to faceted (`--force-prismatic` overrides); the scan
+  repair ladder needs pymeshlab (Linux x86_64).
+* The CadQuery script reproduces the recognised extrusion structure; patched
+  regions are not in the script.
+
+## Roadmap
+
+In rough priority order:
+
+- **Curved-plate consolidation for Boundary Fill.** A body whose gently
+  curved plates segment into many near-parallel plane strips (the frame)
+  never closes its cells: the strips' tools cannot reach each other at
+  grazing angles. Needs curved fits over gently-bent plane chains, tools
+  first. (Torus fits landed in v0.3.2; apex cones and tapered pins in
+  v0.3.3; pinch repair, blend-chain tools and the OCC dry-run outlook in
+  v0.3.4 — variable-radius fillets stay exact bands in the STEP by design.)
+- **Clean intersection edges on face-group solids.** Today each analytic face
+  in the STEP is bounded by the mesh's own polyline edges. Done via the
+  Fusion 360 Boundary Fill script for cleanly fitted parts (experimental,
+  see Usage); still to do natively in the STEP.
+- **Named features in the generated script** — `hole()`, counterbores and
+  `fillet()` calls instead of raw cylinder cuts.
+- **Region growing for 3D scans** — real faces on scanned parts instead of a
+  faceted solid.
+- **Faster conversions** — warm worker process, bodies converted in parallel.
+- **X-Ray as a job.** A 500-slice stack of a big organic scan does not fit
+  the 240 s download budget; running it as a job (like a conversion, with
+  progress and cancel) or streaming the script section by section would
+  lift the limit. A "Loft the stack" option in the X-Ray script is the
+  other half (the add-in has it).
+
+## License
+
+**PolyForm Noncommercial 1.0.0** — see [LICENSE](../LICENSE). In short: you may
+use, copy, change and share this software for personal, hobby, educational,
+research and other noncommercial purposes. Any commercial use needs the
+author's permission — get in touch.
+
+Third-party components keep their own licences (CadQuery Apache-2.0,
+OpenCascade LGPL-2.1 with exception, trimesh MIT, shapely/networkx BSD).
+The optional `scan` extra pulls in **pymeshlab, which is GPL-3.0**; it is not
+part of this package's licence and is installed only if you ask for it.
