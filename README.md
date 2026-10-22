@@ -2,6 +2,11 @@
 
 Turn an STL or OBJ mesh into a real solid you can model against in Fusion 360.
 
+**[User manual](docs/manual/stlToSolid-User-Manual.md)**: how to use each
+tool and what every setting does, with screenshots.
+Also as a [PDF](docs/manual/stlToSolid-User-Manual.pdf) and on the website at
+[stltosolid.com/docs](https://stltosolid.com/docs/).
+
 ## Why
 
 I design 3D-printed parts as a hobby, and I kept needing to model *around*
@@ -48,6 +53,11 @@ and cylinders, and holes that are real holes.
 
 Results open in Fusion 360 (or any CAD program that reads STEP).
 
+There is also a **Fusion 360 add-in, Mesh to Outline** (coming soon), that
+does the X-Ray tracing inside Fusion itself. The
+[user manual](docs/manual/stlToSolid-User-Manual.md) has a step-by-step guide
+for every tool, the add-in included.
+
 ## Get it
 
 | | |
@@ -71,7 +81,11 @@ Some results come with a `.py` script for Fusion 360. To run one:
 
 ## More detail
 
-How each tool works, every setting, the API, measured results and the
+**Using the app:** the [user manual](docs/manual/stlToSolid-User-Manual.md)
+([PDF](docs/manual/stlToSolid-User-Manual.pdf)) walks through every tool and
+every setting.
+
+**How it works inside:** how each tool works, every setting, the API, measured results and the
 version history are in [docs/TECHNICAL.md](docs/TECHNICAL.md).
 
 ## Licence
