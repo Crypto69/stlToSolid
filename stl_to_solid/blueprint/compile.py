@@ -1,12 +1,15 @@
 """compile_recipe: one recipe in, the deliverables out — output.step,
 preview.stl (for the web viewer), output_fusion.py (the parametric Fusion
-script), recipe.json (the normalized recipe that was built) — and a
-summary dict the worker puts in result.json."""
+script), recipe.json (the normalized recipe that was built), the four
+rendered views (render_<view>.png + renders.json) — and a summary dict
+the worker puts in result.json."""
+import base64
 import json
 import os
 
 from .build_cq import Build, BlueprintError, build, feature_map, preview_mesh
 from .fusion_blueprint import emit_fusion_blueprint_script
+from .render import coarse_mesh, render_views, write_renders
 from .schema import normalize
 from .validate import validate
 
@@ -36,17 +39,18 @@ def compile_recipe(recipe, out_dir, title=None, stem='output'):
         f.write(emit_fusion_blueprint_script(r, title=title or r['name']))
     with open(os.path.join(out_dir, 'recipe.json'), 'w') as f:
         json.dump(r, f, indent=1)
+    renders = write_renders(render_views(coarse_mesh(b.solid)), out_dir)
     want = [rep.resolved['overall'].get(k) for k in ('w', 'd', 'h')]
     got = b.bbox['size']
     dev = [((got[i] - want[i]) / want[i] * 100.0) if want[i] else None for i in range(3)]
     return {
-        'mode': 'blueprint', 'recipe': r,
+        'mode': 'blueprint', 'kind': 'recipe', 'parametric': True, 'recipe': r,
         'warnings': list(rep.warnings) + list(b.warnings), 'errors': [],
         'bbox': b.bbox, 'volume_mm3': b.volume_mm3, 'solids': b.n_solids,
         'overall_check': {'expected': want, 'got': got, 'dev_pct': dev},
         'per_feature': b.per_feature,
         'has_fusion_script': True, 'has_step': True, 'preview': 'preview.stl',
-        'preview_map': 'preview_features.json',
+        'preview_map': 'preview_features.json', 'renders': renders,
         'n_features': len(r['features']), 'n_params': len(r['params']),
     }
 
@@ -65,10 +69,12 @@ def feature_colours(b: Build, mesh):
     return {'features': b.features, 'triangle_feature': feature_map(b, mesh)}
 
 
-def quick_preview(recipe, out_dir, stem='live'):
+def quick_preview(recipe, out_dir, stem='live', render=False):
     """The live preview: validate, build, write <stem>.stl and
     <stem>_features.json only (no STEP, no script, nothing in the job's
-    result). Returns the summary dict the /preview route answers with."""
+    result). With `render`, also the four views, returned inline as
+    base64 PNGs (the read loop sends them to the model). Returns the
+    summary dict the /preview route answers with."""
     r = normalize(recipe)
     rep = validate(r)
     if not rep.ok:
@@ -82,9 +88,14 @@ def quick_preview(recipe, out_dir, stem='live'):
         json.dump(colours, f)
     want = [rep.resolved['overall'].get(k) for k in ('w', 'd', 'h')]
     got = b.bbox['size']
-    return {'ok': True, 'bbox': b.bbox, 'volume_mm3': b.volume_mm3, 'solids': b.n_solids,
-            'warnings': list(rep.warnings) + list(b.warnings),
-            'overall_check': {'expected': want, 'got': got,
-                              'dev_pct': [((got[i] - want[i]) / want[i] * 100.0) if want[i] else None
-                                          for i in range(3)]},
-            'features': colours['features'], 'triangle_feature': colours['triangle_feature']}
+    out = {'ok': True, 'bbox': b.bbox, 'volume_mm3': b.volume_mm3, 'solids': b.n_solids,
+           'warnings': list(rep.warnings) + list(b.warnings),
+           'overall_check': {'expected': want, 'got': got,
+                             'dev_pct': [((got[i] - want[i]) / want[i] * 100.0) if want[i] else None
+                                         for i in range(3)]},
+           'features': colours['features'], 'triangle_feature': colours['triangle_feature']}
+    if render:
+        out['renders'] = [{'view': x['view'], 'caption': x['caption'],
+                           'png_b64': base64.b64encode(x['png']).decode('ascii')}
+                          for x in render_views(coarse_mesh(b.solid))]
+    return out

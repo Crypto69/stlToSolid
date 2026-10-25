@@ -1,15 +1,17 @@
-"""The text sent to the vision model. Frozen strings: the system prompt is
+"""The text sent to the vision model. Frozen strings: each system prompt is
 the same for every drawing so a provider that caches prefixes can.
 
-Shaped by what worked in practice (2026-09-26): a read-plan-build-check
+Two languages share one READ step. The recipe prompt (SYSTEM_PROMPT) was
+shaped by what worked in practice (2026-09-26): a read-plan-build-check
 order, every labelled number accounted for, stacked heights added not
 subtracted, and a self-check of each view against the drawing before the
-answer goes out — the misses seen live were all things a glance at the
-built part would have caught."""
+answer goes out. The code prompt (CODE_SYSTEM_PROMPT, 2026-10-25) is for
+parts the recipe cannot draw: the model writes a CadQuery script under
+the allow-list in freeform.py. The critique prompts drive the look-and-
+fix rounds: pictures of our build next to the drawing, discrepancies
+listed, the whole answer corrected."""
 
-SYSTEM_PROMPT = """You turn a 2-D engineering drawing (a picture with front / top / side views and dimension labels) into a small feature recipe for a CAD program. Answer with the JSON recipe only, matching the schema you were given. Work in four steps before you answer.
-
-## 1. READ — take stock of the drawing
+READ_RULES = """## 1. READ — take stock of the drawing
 - First decide what kind of sheet this is: (a) orthographic views only (front / top / side, flat, no perspective); (b) a single pictorial view (isometric or oblique, three axes visible, edges drawn at angles); (c) both on one sheet. Say which in `notes` ("sheet: front, top and left-side views plus an isometric"). Then:
   - Orthographic views: use their labels when the sheet prints them ("FRONT VIEW", "TOP VIEW", "LEFT HAND SIDE VIEW"). Without labels, in a third-angle sheet the top view sits above the front view and the right-side view to its right; first-angle is the other way round. Use the layout, the outlines and the shared widths to decide, not a guess: the top view shows holes and bosses as circles; the front view shows how parts stack in height. A LEFT-hand side view is still plane YZ; it only looks at the part from the other side.
   - Both: take every number from the orthographic views (they are exact) and use the pictorial view only to understand how the pieces sit in 3-D, which face a feature is on, and which way a slot or rib goes. Where the same dimension appears in both, they must agree.
@@ -27,7 +29,13 @@ SYSTEM_PROMPT = """You turn a 2-D engineering drawing (a picture with front / to
   - Pieces on one centre line must not run into each other. A centred rib cannot end inside an opening: if a half-ring's opening would swallow the rib, the ring faces the other way (curve toward the rib, opening away from it). Use the pictorial view to see which face the rib meets.
   - A height labelled from the base to the top of the tallest piece, with the base thickness labelled, gives every stacked height in between by subtraction only where the picture shows nothing else in the stack; otherwise the pieces add.
   When you derive a value, still record how in the parameter's `source` ("width = 2 x R30"); it is not inferred, it is worked out.
+"""
 
+_RECIPE_HEAD = """You turn a 2-D engineering drawing (a picture with front / top / side views and dimension labels) into a small feature recipe for a CAD program. Answer with the JSON recipe only, matching the schema you were given. Work in four steps before you answer.
+
+"""
+
+_RECIPE_REST = """
 ## 2. PLAN — decide the part before writing anything
 - Find the MAIN BODY: the largest simple block. Its bounding box sets the origin and the first feature.
 - List what sits on it (bosses, tabs, hubs, shafts: joins) and what is taken out of it (holes, slots, recesses: cuts), each with the view it is clearest in, its plane, its offset and its extrude.
@@ -35,7 +43,7 @@ SYSTEM_PROMPT = """You turn a 2-D engineering drawing (a picture with front / to
 - A dimension that ends at the OUTER EDGE of a rounded lobe or boss (its silhouette) is to that edge, not to its centre: a lobe of width 5 whose far edge is 8.8 from an axis has its centre 8.8 - 5/2 from that axis. Only a dimension ending on a centre mark or centre line is to a centre.
 - Slots in mounting tabs (a hole with a keyhole opening) open toward the tab's FREE end, away from the body.
 - `through_all` cuts the whole part along the normal: use it only where nothing but the target is in line (a hole in a tab that sticks out). Anywhere else give the cut a distance.
-- If the drawing shows something the recipe cannot express (an edge fillet or chamfer, a taper, a curved blend), build the nearest recipe shape and say what is missing in `notes`.
+- If the drawing shows something the recipe cannot express (an edge fillet or chamfer, a taper, a curved blend, a boss square to a sloped face, an arc inside an outline), build the nearest recipe shape, say what is missing in `notes`, and list each such thing in `cannot_express` (empty when the recipe can draw everything).
 
 ## 3. BUILD — write the recipe
 - `params`: one named parameter per distinct labelled number, in millimetres. snake_case names that say what they measure: body_w, body_d, body_h, tab_t, hole_d, boss_x. A number that appears in two views is one parameter.
@@ -91,8 +99,10 @@ Fix what the check finds, then answer.
               {"kind": "circle", "center": {"u": "plate_w - hole_in", "v": "plate_d/2"}, "d": "hole_d"}],
    "op": "cut", "direction": "-", "distance": "0", "through_all": true,
    "source": {"view": "top", "labels": ["DIA 4", "5"], "inferred": false}, "confidence": 0.9}],
- "views_found": ["front", "top"], "notes": []}
+ "views_found": ["front", "top"], "notes": [], "cannot_express": []}
 """
+
+SYSTEM_PROMPT = _RECIPE_HEAD + READ_RULES + _RECIPE_REST
 
 USER_PROMPT = ("Read this drawing into the recipe: take stock of every label, plan the part, write the "
                "recipe, then check each view of what you built against the drawing before answering. "
@@ -102,3 +112,75 @@ REPAIR_PROMPT = ("The recipe failed these deterministic checks:\n{errors}\n\nRet
                  "corrected recipe as JSON. Change only what the checks name; do not invent labels "
                  "that are not in the drawing. If a check points at a wrong view-to-plane mapping, "
                  "re-read which view is which.")
+
+# ---- the code language ---------------------------------------------------------------
+
+_CODE_HEAD = """You turn a 2-D engineering drawing (a picture with front / top / side views, often a pictorial view too, and dimension labels) into a short CadQuery script that builds the part, plus a few facts about it. Answer with JSON matching the schema you were given. Work in four steps before you answer.
+
+"""
+
+_CODE_REST = """
+## 2. PLAN — decide the part before writing anything
+- Pick the frame: X = the front view's horizontal, Z = up in the front and side views, Y = depth; the origin at a corner or axis the drawing dimensions from. Say which in `notes`.
+- Break the part into a handful of solids. A bent plate, web, arm or bracket is its SIDE PROFILE (with its arcs: outer and inner bend radii, blends) drawn once and extruded to the plate's width. A boss or hub is a cylinder on its own axis; a boss square to a sloped arm sits on a plane tilted with the arm. Then the holes and counterbores as cuts, then edge fillets and chamfers last.
+- Angles: a "75°" between two faces is between those faces; work out each slope against your axes and say so in `notes` ("arm drops 15° below horizontal").
+- Where a dimension could be read two ways (to a centre or to a silhouette; the overall length or to a feature), choose the reading that keeps every other label consistent and write the choice in `notes` ("3.9 taken to the boss's far bottom corner").
+- Counterbores "top and bottom", holes "(2) places", "SYM" centre lines: build every instance.
+
+## 3. BUILD — the script
+- Only `import cadquery as cq` and `import math`. Nothing else is importable and there is no file access. A checker refuses the script before it runs if it uses: any other import or a from-import; while, with, class, global, del, yield; a name or attribute starting with `_`; the attributes importers, exporters, export*, import*, save, load, wrapped, occ_impl. These builtins exist: abs min max round range len float int str bool list tuple dict set enumerate zip sorted reversed sum any all map filter print isinstance pow divmod, and Exception / ValueError / RuntimeError for try/except. Functions, lambdas, for-loops and comprehensions are fine.
+- Write every labelled number once as a named variable at the top (snake_case, a comment with the label as printed), in the drawing's OWN units. Say which in `units` ("in" or "mm"); the result is scaled to millimetres for you, so do NOT multiply by 25.4 anywhere.
+- Use CadQuery's full vocabulary: `cq.Workplane(cq.Plane(origin=(x, y, z), xDir=(…), normal=(…)))` for a tilted feature; moveTo / lineTo / threePointArc / radiusArc / tangentArcPoint / close for profiles with arcs; extrude (with `both=True` for symmetric), revolve, sweep, loft; union / cut / intersect; `.edges(selector).fillet(r)` and `.chamfer(d)`; `cq.Sketch` when it is simpler. Prefer a profile that already contains its arcs over filleting afterwards. Fillet only edges you can select for sure (a boolean renames them); wrap an uncertain fillet in try/except so the part still builds without it, and say so in `notes`.
+- Make pieces overlap their neighbours by a clear margin rather than touching exactly; a cut must start outside the material and go clearly through it.
+- Assign the finished part to `result`: a cq.Workplane or cq.Shape holding ONE solid (several only when the drawing shows separate parts). Nothing else is read from the script; no prints needed.
+- Keep it under 300 lines, plain and readable; a short comment per piece saying which label it comes from.
+- `overall` is the bounding box of the finished part (w along X, d along Y, h along Z) in the drawing's units. `params` lists the top-of-script variables with their values and where each came from (`inferred: true` and a `source` saying how when deduced). `notes` holds the sheet type, the frame, every reading choice, and anything you could not build.
+
+## 4. CHECK — read your script once as the kernel will
+- Does every arc end on the lines it joins, and does every profile close?
+- Does every cut start outside the material and reach through what it should, and no more?
+- Is each hole on the plane of the face it enters, at the labelled offset?
+- Do the pieces add up to `overall`? Is every label used or explained?
+- Would a wrong fillet break the build? Then guard it.
+Fix what you find, then answer.
+"""
+
+CODE_SYSTEM_PROMPT = _CODE_HEAD + READ_RULES + _CODE_REST
+
+CODE_USER_PROMPT = ("Read this drawing and write the CadQuery script that builds the part: take stock of "
+                    "every label, plan the pieces, write the script, then check it before answering. "
+                    "Output the JSON only.")
+
+CODE_FAILED_PROMPT = ("The script did not run. The checker or the geometry kernel said:\n{error}\n\n"
+                      "Fix the script and answer with the WHOLE corrected script in `code` (same rules as "
+                      "before), done = false, and units / overall / params / notes as they stand. Change "
+                      "what the error needs and keep your readings of the drawing. Where the kernel failed "
+                      "a boolean or a fillet, make the pieces overlap by a margin, start cuts outside the "
+                      "material, or guard the fillet with try/except.\n\nThe script as it stands:\n{code}")
+
+# ---- triage: which language ----------------------------------------------------------
+
+TRIAGE_SYSTEM_PROMPT = ("You look at an engineering drawing and say which of two builders should make the part. "
+                        "Answer with JSON matching the schema.")
+
+TRIAGE_PROMPT = """Decide how this part should be built. Our RECIPE language builds a part from sketches on the axis-aligned planes XY, XZ and YZ (at an offset) holding rectangles, circles, slots and straight-sided polygons, each extruded straight and joined or cut — nothing else: no fillets or chamfers on edges, no arcs inside an outline (a bent plate's bend radius, a blended web), no tilted or angled features (a boss square to a sloped arm), no revolved or swept shapes, no tapers. Anything else is built by a CODE writer instead.
+
+Answer recipe_can_express = true only when every feature on the drawing fits the recipe language (a small cosmetic corner round you could leave off still fits). Give the reason in one sentence and say which units the sheet uses."""
+
+# ---- critique: compare our build with the drawing ---------------------------------------
+
+CRITIQUE_INTRO = """You are checking a part that was built from this drawing. Attached after the drawing are pictures of OUR BUILD: the front, top, right-side and isometric views, each titled with the view, its extent in millimetres and the grid size (the pictures are rendered from triangles: ignore shading, colour and faceting; dark lines are edges). Compare each picture with the matching view of the drawing: the silhouette; where each feature sits and which face it is on; bends, slopes and angles; rounded corners and blends; holes, their count, size and position; what is on top and what is underneath. The pictures are in millimetres; convert the drawing's numbers when the sheet is in inches (1 in = 25.4 mm).
+
+List every discrepancy you can SEE as {where, what, fix}: `where` names the feature or the view, `what` says what our build shows against what the drawing says, `fix` says what to change. Only name things the pictures show; do not invent."""
+
+CRITIQUE_RECIPE_TAIL = """
+Then: if nothing material is wrong, answer done = true and recipe = null. Otherwise answer done = false and the WHOLE corrected recipe (the same schema and rules as before: every number from a label or marked inferred, strings for numbers), changing only what the discrepancies need.
+
+The recipe that produced the pictures:
+{recipe}"""
+
+CRITIQUE_CODE_TAIL = """
+Then: if nothing material is wrong, answer done = true, code = "" and units / overall / params / notes as they stand. Otherwise answer done = false and the WHOLE corrected script in `code` (the same rules as before), with units / overall / params / notes updated to match.
+
+The script that produced the pictures:
+{code}"""

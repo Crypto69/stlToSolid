@@ -46,6 +46,19 @@ services:
       # STLTOSOLID_BLUEPRINT_TIMEOUT: "300"
       # largest drawing image accepted, bytes (default 20 MB)
       # STLTOSOLID_MAX_IMAGE: "20971520"
+      # Blueprint's code mode: for a part the recipe language cannot draw,
+      # the model writes a short CadQuery script that runs in a worker here
+      # under an allow-list (only cadquery and math, no files, no while).
+      # On by default; set 0 on a shared install that would rather not run
+      # model-written code at all.
+      # STLTOSOLID_ALLOW_CODE: "1"
+      # seconds one run of that script may take before it is stopped (default 120)
+      # STLTOSOLID_CODE_TIMEOUT: "120"
+      # look-and-fix rounds the Blueprint panel starts with, 0..3 (default 0 =
+      # off): each round builds the part, draws it from four sides and asks
+      # the model to compare the pictures with the drawing — one more model
+      # call, and it can talk itself into a wrong reading; try 1 or 2 per part
+      # STLTOSOLID_BLUEPRINT_ROUNDS: "0"
     # keep a runaway conversion from starving the NAS's other services
     mem_limit: 12g
     restart: unless-stopped

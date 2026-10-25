@@ -82,18 +82,20 @@ class Helper:
     def alive(self):
         return self._proc is not None and self._proc.poll() is None
 
-    def build(self, recipe, out_dir, stem='live', timeout=BUILD_TIMEOUT_S):
-        """The helper's answer dict for a valid recipe. Raises PreviewError
+    def build(self, recipe, out_dir, stem='live', timeout=BUILD_TIMEOUT_S, render=False):
+        """The helper's answer dict for a valid recipe (with `render`, the
+        four views as base64 PNGs under 'renders'). Raises PreviewError
         with a sentence (and .validation when the recipe was refused)."""
+        req = json.dumps({'recipe': recipe, 'out_dir': out_dir, 'stem': stem, 'render': render}) + '\n'
         with self._lock:
             if not self.alive():
                 self._start()
             try:
-                self._proc.stdin.write(json.dumps({'recipe': recipe, 'out_dir': out_dir, 'stem': stem}) + '\n')
+                self._proc.stdin.write(req)
                 self._proc.stdin.flush()
             except (OSError, ValueError):
                 self._start()
-                self._proc.stdin.write(json.dumps({'recipe': recipe, 'out_dir': out_dir, 'stem': stem}) + '\n')
+                self._proc.stdin.write(req)
                 self._proc.stdin.flush()
             ans = self._read(timeout)
             if ans is None:

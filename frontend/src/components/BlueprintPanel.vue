@@ -69,7 +69,7 @@ const liveOverall = computed(() => {
   const worst = Math.max(...(oc.dev_pct || []).filter((d) => d != null).map(Math.abs), 0)
   return `${store.liveInfo.bbox.size.map((v) => fmt(v, 2)).join(' × ')} mm · worst ${fmt(worst, 1)} % off the drawing`
 })
-const rebuild = () => { if (draft.value) store.rebuild(draft.value) }
+const rebuild = () => { if (draft.value) store.rebuild({ recipe: draft.value }) }
 const orig = (fi, path) => {
   // the server's value at the same place, for the changed-outline
   let o = store.recipe?.features?.[fi]
@@ -90,6 +90,46 @@ const setAt = (obj, path, v) => {
   o[path[path.length - 1]] = v
 }
 const planeWord = { XY: 'XY (top view)', XZ: 'XZ (front view)', YZ: 'YZ (side view)' }
+
+// ---- how to build, and the read's progress ------------------------------------------
+const cfg = computed(() => store.blueprintConfig || {})
+const defaultRounds = computed(() => cfg.value.default_rounds ?? 0)
+const modeHint = {
+  auto: 'The model looks at the drawing first and picks: a recipe when every feature is a straight extrude, code otherwise.',
+  recipe: 'Sketches and extrudes on the three flat planes: an editable table, a live redraw and a parametric Fusion script. No fillets, bends or tilted features.',
+  code: 'The model writes a short CadQuery script (any shape: bends, blends, tilted bosses, fillets) that runs on the server under an allow-list. You get a STEP and the script, no Fusion script.',
+}
+// the last line the server logged while it reads (the loop says what it is doing)
+const lastLog = computed(() => {
+  const lines = (store.log || '').trim().split('\n')
+  return lines[lines.length - 1] || ''
+})
+const cannotExpress = computed(() => store.recipe?.cannot_express || [])
+const tryAsCode = () => { store.setMode('code'); store.readDrawing() }
+
+// ---- code mode: the script, editable, run again without the model ------------------
+const codeDraft = ref('')
+watch(() => store.freeform, (f) => { codeDraft.value = f?.code || '' }, { immediate: true })
+const codeDirty = computed(() => !!store.freeform && codeDraft.value !== (store.freeform.code || ''))
+const revertCode = () => { codeDraft.value = store.freeform?.code || '' }
+const runCode = () => store.rebuild({ code: codeDraft.value, units: store.freeform?.units || 'mm' })
+const unitWord = computed(() => (store.freeform?.units === 'in' ? 'in' : 'mm'))
+
+// ---- what the model checked: one line per round --------------------------------------
+// the log also keeps every script version (kind 'first', then each change); the list shows the checks
+const rounds = computed(() => (store.recipeRead?.rounds || []).filter((r) => r.kind !== 'first'))
+const roundText = (r) => {
+  if (r.kind === 'fix') return `repair ${r.round}: the script did not run — ${r.error || ''}`
+  if (r.build_error) return `check ${r.round}: the build failed — ${r.build_error}`
+  if (r.error) return `check ${r.round}: no usable answer — ${r.error}`
+  const n = (r.discrepancies || []).length
+  if (r.rejected) return `check ${r.round}: ${n} found, correction not taken (${r.rejected})`
+  if (r.changed) return `check ${r.round}: ${n} discrepanc${n === 1 ? 'y' : 'ies'} fixed`
+  return `check ${r.round}: the build matches the drawing${n ? ` (${n} small note${n === 1 ? '' : 's'})` : ''}`
+}
+const renderViews = computed(() => (store.renders || []).map((r) => ({
+  ...r, url: `/api/blueprints/${store.jobId}/render/${r.view}?t=${store.renderStamp}`,
+})))
 
 // ---- report + downloads -----------------------------------------------------------
 const fmt = (v, d = 2) => (v == null || Number.isNaN(Number(v)) ? '—' : Number(v).toFixed(d))
@@ -176,6 +216,25 @@ const readLabel = computed(() => {
           <option value="high">high</option>
         </select>
       </div>
+      <div class="row">
+        <label for="bp_mode">How to build</label>
+        <select id="bp_mode" :value="store.mode" :class="{ touched: store.mode !== 'auto' }"
+                @change="store.setMode($event.target.value)">
+          <option value="auto">auto (the model decides)</option>
+          <option value="recipe">recipe (parametric table)</option>
+          <option value="code" :disabled="!store.allowCode">code (any shape, STEP only)</option>
+        </select>
+      </div>
+      <p class="hint">{{ modeHint[store.mode] }}<template v-if="!store.allowCode"> Code is switched off on this server.</template></p>
+      <div class="row">
+        <label for="bp_rounds">Self-check <span class="help">look-and-fix rounds</span></label>
+        <select id="bp_rounds" :value="store.roundsValue" :class="{ touched: store.roundsValue !== defaultRounds }"
+                title="After reading, the part is built and drawn from four sides; the model compares the pictures with the drawing and corrects what differs. Each round is one more model call."
+                @change="store.setRounds($event.target.value)">
+          <option :value="0">off</option>
+          <option v-for="n in (cfg.max_rounds ?? 3)" :key="n" :value="n">{{ n }}</option>
+        </select>
+      </div>
       <div v-if="store.customUrl" class="row">
         <label for="bp_url">Base URL</label>
         <input
@@ -221,6 +280,7 @@ const readLabel = computed(() => {
       v-if="store.status === 'running'" type="button" class="cancel"
       :disabled="store.cancelling" @click="store.cancel()"
     >{{ store.cancelling ? 'Stopping…' : 'Cancel' }}</button>
+    <p v-if="store.readStatus === 'reading' && lastLog" class="hint num progress">{{ lastLog }}</p>
     <p v-if="!store.jobId || !store.isImageJob" class="hint">Drop or paste a drawing image first.</p>
     <p v-if="store.error" class="hint warn">{{ store.error }}</p>
     <p v-if="store.cancelled" class="hint">Stopped. The drawing is still here.</p>
@@ -229,6 +289,11 @@ const readLabel = computed(() => {
     <ul v-if="store.warnings.length" class="warn list">
       <li v-for="(w, i) in store.warnings" :key="i">{{ w }}</li>
     </ul>
+    <button v-if="cannotExpress.length && store.allowCode && store.canRead" type="button" class="dl"
+            title="read the drawing again with the model writing the part as code"
+            @click="tryAsCode">
+      Read again as code — the recipe cannot draw: {{ cannotExpress.join('; ') }}
+    </button>
 
     <!-- 4. the recipe: parameters, then features -->
     <template v-if="draft">
@@ -315,6 +380,52 @@ const readLabel = computed(() => {
       </p>
     </template>
 
+    <!-- 4b. code mode: the script the model wrote -->
+    <template v-if="store.freeform && !draft">
+      <header class="head gate">
+        <h2 class="micro">Script <span class="help">CadQuery, {{ unitWord === 'in' ? 'inches' : 'mm' }}</span></h2>
+        <button v-if="codeDirty" class="reset" type="button" @click="revertCode">Revert</button>
+      </header>
+      <table v-if="store.freeform.params?.length" class="recipe">
+        <thead class="micro"><tr><th>Name</th><th>Value ({{ unitWord }})</th><th>From</th></tr></thead>
+        <tbody>
+          <tr v-for="p in store.freeform.params" :key="p.name">
+            <td class="num name">{{ p.name }}<span v-if="p.inferred" class="badge" title="deduced, not read from a label">?</span></td>
+            <td class="num">{{ p.value }}</td>
+            <td class="from">{{ p.source || '—' }}</td>
+          </tr>
+        </tbody>
+      </table>
+      <textarea class="code num" v-model="codeDraft" rows="18" spellcheck="false" autocomplete="off"
+                aria-label="the CadQuery script" />
+      <ul v-if="store.freeform.notes?.length" class="notes">
+        <li v-for="(n, i) in store.freeform.notes" :key="i">{{ n }}</li>
+      </ul>
+      <button type="button" class="dl press" :disabled="!codeDirty || store.busy" @click="runCode">
+        {{ codeDirty ? 'Run the script again (STEP)' : 'Run again (nothing changed)' }}
+      </button>
+      <p class="hint">
+        The part was written as code because the recipe language cannot draw it
+        (bends, blends, tilted bosses, fillets). Change a number at the top and run
+        it again; the script runs on the server under an allow-list (only
+        <span class="num">cadquery</span> and <span class="num">math</span>, no files).
+        There is no Fusion script for code: the STEP imports as a plain solid.
+      </p>
+    </template>
+
+    <!-- 4c. what the model checked -->
+    <template v-if="rounds.length">
+      <h2 class="micro">Self-check <span class="help">what the model saw and fixed</span></h2>
+      <ol class="rounds">
+        <li v-for="(r, i) in rounds" :key="i">
+          {{ roundText(r) }}
+          <ul v-if="r.discrepancies?.length" class="disc">
+            <li v-for="(d, j) in r.discrepancies" :key="j"><b v-if="d.where">{{ d.where }}:</b> {{ d.what }}<template v-if="d.fix"> → {{ d.fix }}</template></li>
+          </ul>
+        </li>
+      </ol>
+    </template>
+
     <!-- 5. report + downloads -->
     <template v-if="store.status === 'done' && store.result?.ok && store.isImageJob">
       <header class="head gate"><h2 class="micro">Built</h2></header>
@@ -328,24 +439,34 @@ const readLabel = computed(() => {
             <td>Read by</td>
             <td class="num">
               {{ store.recipeRead.model }}
-              <template v-if="store.recipeRead.usage"> · {{ store.recipeRead.usage.input_tokens }} in / {{ store.recipeRead.usage.output_tokens }} out</template>
+              <template v-if="store.recipeRead.mode"> · as {{ store.recipeRead.mode }}</template>
+              <template v-if="store.recipeRead.usage"> · {{ store.recipeRead.usage.input_tokens }} in / {{ store.recipeRead.usage.output_tokens }} out<template v-if="store.recipeRead.usage.calls > 1"> · {{ store.recipeRead.usage.calls }} calls</template></template>
               <template v-if="store.recipeRead.seconds"> · {{ fmt(store.recipeRead.seconds, 0) }} s</template>
             </td>
           </tr>
         </tbody>
       </table>
-      <a class="dl" :href="store.fusionScriptUrl" download @click="guardDownload($event, store.fusionScriptUrl)">
+      <div v-if="renderViews.length" class="views" title="the four views the model compared with the drawing; click one to open it">
+        <a v-for="r in renderViews" :key="r.view" :href="r.url" target="_blank" rel="noopener">
+          <img :src="r.url" :alt="r.caption" :title="r.caption" />
+        </a>
+      </div>
+      <a v-if="store.fusionScriptUrl" class="dl" :href="store.fusionScriptUrl" download @click="guardDownload($event, store.fusionScriptUrl)">
         Download Fusion 360 script (.py) — parametric
       </a>
       <a class="dl" :href="store.downloadUrl" download @click="guardDownload($event, store.downloadUrl)">
         Download STEP
       </a>
       <p v-if="downloadError" class="hint warn">{{ downloadError }}</p>
-      <p class="hint">
+      <p v-if="store.fusionScriptUrl" class="hint">
         Put the .py in an empty folder, then in Fusion Utilities → Add-Ins →
         Scripts and Add-Ins → + → choose that folder → Run, in a new parametric
         design. Every parameter becomes a User Parameter (Modify → Change
         Parameters), every feature a dimensioned sketch and an Extrude.
+      </p>
+      <p v-else class="hint">
+        Written as code, so there is no parametric Fusion script: import the STEP
+        (File → Open or Insert → Insert Derive) and it arrives as one plain solid.
       </p>
     </template>
     <details v-if="store.log" class="logbox" :open="store.status === 'running'">
@@ -412,6 +533,27 @@ const readLabel = computed(() => {
 .kv .tick { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--muted); margin-left: 4px; }
 .kv .tick input { accent-color: var(--edge); margin: 0; }
 .kv .tick.touched { color: var(--edge); }
+.progress { color: var(--edge); }
+.code {
+  width: 100%;
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.4;
+  background: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--text);
+  padding: 6px 8px;
+  resize: vertical;
+  white-space: pre;
+  overflow: auto;
+  tab-size: 4;
+}
+.notes { margin: 0; padding-left: 18px; font-size: 11px; color: var(--muted); display: flex; flex-direction: column; gap: 2px; }
+.rounds { margin: 0; padding-left: 18px; font-size: 12px; display: flex; flex-direction: column; gap: 4px; }
+.rounds .disc { margin: 2px 0 0; padding-left: 14px; font-size: 11px; color: var(--muted); }
+.views { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
+.views img { display: block; width: 100%; border: 1px solid var(--line); border-radius: 3px; background: #fff; }
 .logbox pre {
   margin-top: 6px;
   max-height: 180px;

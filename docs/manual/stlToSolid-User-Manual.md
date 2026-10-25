@@ -5,7 +5,7 @@
 <h1 align="center">stlToSolid — User Manual</h1>
 
 <p align="center"><b>Mesh in · solid out</b><br>
-Version 0.5.7 · October 2026</p>
+Version 0.5.8 · October 2026</p>
 
 ---
 
@@ -18,7 +18,7 @@ Version 0.5.7 · October 2026</p>
 | 3 | [Mesh → Solid](#3-mesh--solid) | Turns a machined or CAD-designed mesh into a clean STEP solid with real flat faces, cylinders and holes. Also gives you editable CadQuery and Fusion 360 scripts. |
 | 4 | [Sliced Loft](#4-sliced-loft) | Slices a smooth, organic shape (a cap, handle or shell) along one axis and lofts the outlines into one smooth solid. |
 | 5 | [X-Ray](#5-x-ray) | Turns slices of the mesh into real Fusion 360 sketches (lines, arcs and splines, not thousands of points) that you can select and extrude. Downloads a whole stack as one script, and can extrude them into solid slabs. |
-| 6 | [Blueprint](#6-blueprint) | Reads a dimensioned drawing (a picture) into named parameters and sketch-and-extrude features. Builds a parametric Fusion 360 script and a STEP. |
+| 6 | [Blueprint](#6-blueprint) | Reads a dimensioned drawing (a picture) into named parameters and sketch-and-extrude features, checks its own build against the drawing, and builds a parametric Fusion 360 script and a STEP. Parts the recipe cannot draw are written as a CadQuery script (STEP only). |
 | 7 | [Fusion 360 add-in: Mesh to Outline](#7-fusion-360-add-in-mesh-to-outline) | The X-Ray and single-slice tracing inside Fusion itself: pick a mesh body and planes, get sketches (and optionally a solid) straight in your design. Also covers the STL to Solid add-in preview. |
 | 8 | [Reading the report](#8-reading-the-report) | What the result badge, the quality checks and the output table mean. |
 | 9 | [Using the results in Fusion 360](#9-using-the-results-in-fusion-360) | How to import the STEP and run the downloaded scripts. |
@@ -407,6 +407,21 @@ extrude features. The part is built from those numbers, so you can fix any
 it misread and rebuild. You get a **parametric Fusion 360 script**, a STEP
 and a 3D preview.
 
+Two things happen on top of that read (both new in 0.5.8):
+
+- **Self-check.** After the read, the part is built and drawn from four
+  sides (front, top, right, isometric). The pictures go back to the model
+  next to the drawing with the question "what differs?", and it corrects
+  its answer. Up to three such rounds; each is one more model call. Off
+  unless you turn it on (see **Self-check** below).
+- **Code mode.** The recipe language only knows flat sketches extruded
+  straight. A bent bracket, a blended web, a boss square to a sloped arm or
+  an edge fillet cannot be said in it. For such a part the model writes a
+  short **CadQuery script** instead, which runs on the server under an
+  allow-list. You get a STEP, the 3D preview and the script itself (you can
+  edit a number and run it again), but no Fusion script: code is not a list
+  of sketches.
+
 ![Blueprint with a drawing loaded](img/blueprint-drawing.jpg)
 *A micro-servo datasheet drawing loaded in Blueprint, ready to read.*
 
@@ -419,15 +434,22 @@ and a 3D preview.
 | **Vision model** | Anthropic (Claude) | The provider that reads the drawing: Anthropic (Claude), OpenAI, DeepSeek, or *Custom* (any OpenAI-compatible server, such as Ollama running a vision model on your own computer, or OpenRouter). |
 | **Model** | the provider's default | Choose from the list, click **refresh** to ask the provider again, or pick *type a name…* to enter one. |
 | **Effort** | high | How hard the model thinks. *high* is the most careful, slowest and most expensive. *medium* takes about half the time. *low* is a quick look. |
+| **How to build** | auto | *auto*: the model looks at the drawing first (one quick, cheap call) and picks a recipe when every feature is a straight extrude, code otherwise. *recipe*: always the parametric table and Fusion script. *code*: always a CadQuery script (any shape, STEP only). Greyed out when the server has code switched off (`STLTOSOLID_ALLOW_CODE=0`). |
+| **Self-check** | off | Look-and-fix rounds, 0 (*off*) to 3. Each round builds the part, draws it from four sides and asks the model to compare the pictures with the drawing, then corrects its answer. Rounds run at *medium* effort when the read ran at *high*. Off by default: a round can also talk the model out of a right reading, so try 1 or 2 on a part and look at the pictures. |
 | **Base URL** | — | *Custom* only: the server's address, for example `http://localhost:11434/v1` for Ollama. |
 | **API key** | empty | Your key for that provider. **show** reveals it, **clear** removes it. It is saved in this browser (or app) only and sent with each read. The server never stores it. Local servers usually need no key. |
 | **Notes for the reader** | empty | Optional hints, for example *"the view with the round boss is the top view; ignore the logo"*. |
 
-Click **Read drawing**. A **Cancel** button appears while it reads.
+Click **Read drawing**. A **Cancel** button appears while it reads, and a
+line under the button says what is happening (*reading the drawing into a
+recipe…*, *check 1 of 2: comparing the views with the drawing…*).
 
 > **Privacy:** the drawing is sent to the provider you pick, with your key,
 > and nowhere else. Choose a local model if the drawing must stay on your
-> computer.
+> computer. In code mode the model's script runs on the server that hosts
+> the app (your computer for the desktop app). It is checked before it
+> runs: only `cadquery` and `math` may be imported, there is no file
+> access, no `while`, and a run is stopped after two minutes.
 
 ### 6.2 Checking and editing the recipe
 
@@ -466,6 +488,24 @@ Any value can be a number or an expression over the parameters, like
 `body_w/2`. Change a value and the 3D view redraws within about a second
 (*Redrawing object…*). Click **Revert** to undo your edits.
 
+If the model notes that the recipe could not draw part of the drawing (a
+fillet, a bend, a tilted boss), a button **Read again as code** appears
+under the warnings; it reads the drawing again in code mode.
+
+**Self-check.** Below the recipe (or the script), a *Self-check* list says
+what each round found: *check 1: 3 discrepancies fixed*, with the model's
+own words for each (*boss: sits upright, drawing shows it square to the
+sloped arm → tilt the boss plane 15°*), then *check 2: the build matches
+the drawing*. A correction that fails more checks than the answer before
+it is not taken.
+
+**Code mode.** Instead of the table you see the **Script**: the model's
+named numbers at the top (with where each came from), the CadQuery code,
+and its notes on how it read the sheet (which view is which, how an
+ambiguous dimension was taken). Edit the script and click **Run the script
+again (STEP)**: no model call, the allow-list check first, then the build.
+**Revert** restores the model's version.
+
 ### 6.3 Rebuilding and downloading
 
 Click **Rebuild with these values (STEP + Fusion script)**. This runs the
@@ -477,12 +517,15 @@ nothing.
 
 The **Built** table shows the size, what the drawing says (and how far off
 the worst dimension is), the volume, the number of bodies, and which model
-read the drawing. Then:
+read the drawing, in which mode, with how many calls. Under it are the four
+pictures the model compared with the drawing (click one to open it full
+size). Then:
 
 - **Download Fusion 360 script (.py) — parametric.** Every parameter
   becomes a Fusion **User Parameter** (*Modify → Change Parameters*), and
   every feature becomes a dimensioned sketch and an Extrude. Change
-  `body_h` in Fusion and the parts on top move with it.
+  `body_h` in Fusion and the parts on top move with it. (Recipe mode only:
+  a part written as code has no Fusion script.)
 - **Download STEP.** The same part as a plain solid.
 
 Click **Read the drawing again** to start over with a fresh read.
@@ -748,9 +791,9 @@ Text Commands**.
 | Mesh → Solid | Yes | Script: parametric timeline (prismatic) or Boundary Fill (face-group) | CadQuery script (prismatic) |
 | Sliced Loft | Yes | Script: section sketches + Loft per run | — |
 | X-Ray | — | Script: one sketch per slice, optionally extruded into slabs | — |
-| Blueprint | Yes | Script: User Parameters, sketches, extrudes | 3D preview |
+| Blueprint | Yes | Script: User Parameters, sketches, extrudes (recipe mode) | 3D preview; four rendered views; the CadQuery script (code mode) |
 | Mesh to Outline (add-in) | — | Sketches drawn straight into the design, optionally extruded into one body | — |
 
 ---
 
-<p align="center"><sub>stlToSolid 0.5.7 · Licensed under PolyForm Noncommercial 1.0.0 · Fusion 360 is a trademark of Autodesk, Inc. stlToSolid is not affiliated with Autodesk.</sub></p>
+<p align="center"><sub>stlToSolid 0.5.8 · Licensed under PolyForm Noncommercial 1.0.0 · Fusion 360 is a trademark of Autodesk, Inc. stlToSolid is not affiliated with Autodesk.</sub></p>

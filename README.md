@@ -50,6 +50,10 @@ and cylinders, and holes that are real holes.
 - **Blueprint.** Starts from a picture, not a mesh. Drop in a dimensioned
   drawing, and an AI model of your choice reads the numbers and builds a
   parametric Fusion script and a STEP. You can fix any number it misread.
+  It then looks at its own build from four sides and corrects what differs
+  from the drawing; a part with bends, blends or tilted bosses, which the
+  parametric recipe cannot draw, it writes as a short CadQuery script
+  instead (STEP only).
 
 Results open in Fusion 360 (or any CAD program that reads STEP).
 

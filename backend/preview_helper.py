@@ -34,7 +34,8 @@ def main():
             continue
         try:
             req = json.loads(line)
-            out = quick_preview(req['recipe'], req['out_dir'], req.get('stem', 'live'))
+            out = quick_preview(req['recipe'], req['out_dir'], req.get('stem', 'live'),
+                                render=bool(req.get('render')))
         except BlueprintError as e:
             out = {'ok': False, 'error': str(e), 'kind': e.kind,
                    'validation': ({'errors': list(e.report.errors), 'warnings': list(e.report.warnings)}

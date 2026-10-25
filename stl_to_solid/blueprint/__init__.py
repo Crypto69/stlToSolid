@@ -15,6 +15,13 @@ X = width (the front view's horizontal), Y = depth, Z = height. Front
 view = XZ, top view = XY, right-side view = YZ. Sketch (u, v) are the two
 world axes of the plane in alphabetical order; the plane's normal is the
 third axis, positive.
+
+A second language, for parts the recipe cannot draw (a bent plate, a boss
+square to a sloped arm, edge fillets): the model writes a CadQuery script
+that runs under an allow-list (freeform.py) and gives a STEP and preview,
+no Fusion script. read_drawing.py picks the language (or asks the model
+to), and after either answer can build the part, draw it from four sides
+(render.py) and send the pictures back for correction.
 """
 from .expr import ExprError, evaluate, to_fusion
 from .schema import SCHEMA, normalize, param_map
