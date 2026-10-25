@@ -107,6 +107,9 @@ All settings live in `docker-compose.yml`; edit, then `docker compose up -d`.
 | `STLTOSOLID_WORKERS` | `2` | shells (bodies and cavities) converted at once inside one job; each worker holds a few hundred MB |
 | `STLTOSOLID_SHELL_TIMEOUT` | `900` | seconds a shell may run in a worker before it is built faceted instead; 0 means no limit |
 | `STLTOSOLID_AXIS_BUDGET` | `120` | seconds one shell's extrusion-axis search may take before the best candidate so far is used; 0 means no limit |
+| `STLTOSOLID_ALLOW_CODE` | `1` | Blueprint's code mode: the model may write a CadQuery script for a part the recipe cannot draw; it runs in a worker under an allow-list (only `cadquery` and `math`, no file access). Set `0` to switch it off on a shared install |
+| `STLTOSOLID_CODE_TIMEOUT` | `120` | seconds one run of such a script may take before it is stopped |
+| `STLTOSOLID_BLUEPRINT_ROUNDS` | `0` | look-and-fix rounds the Blueprint panel starts with (0–3, 0 = off); each round is one more model call |
 | `mem_limit` | `12g` | container memory cap; lower it if other services suffer |
 
 `data/` is disposable: `rm -rf data/*` with the container stopped is always

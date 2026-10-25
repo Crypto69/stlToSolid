@@ -531,6 +531,20 @@ class ReadBody(BaseModel):
     base_url: Optional[str] = Field(None, max_length=500)
     hints: str = Field('', max_length=2000, description='notes for the reader, e.g. which view is which')
     effort: Literal['low', 'medium', 'high'] = 'high'
+    # how the part is built: a parametric recipe, a CadQuery script the
+    # model writes (any shape, STEP only), or let the model choose
+    mode: Literal['auto', 'recipe', 'code'] = 'auto'
+    # look-and-fix rounds: the part is built and drawn from four sides and
+    # the model compares the pictures with the drawing
+    rounds: int = Field(bp.DEFAULT_ROUNDS, ge=0, le=bp.MAX_ROUNDS)
+
+
+def _read_meta(d):
+    try:
+        with open(os.path.join(d, 'read.json')) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
 
 
 @app.post('/api/blueprints/{job_id}/read')
@@ -550,6 +564,9 @@ def blueprint_read(job_id: str, body: ReadBody,
     base_url = ((body.base_url or '').strip() or None) if preset.custom_url else preset.base_url
     if preset.custom_url and not (model and base_url):
         raise HTTPException(400, f'{preset.label} needs both a base URL and a model name.')
+    if body.mode == 'code' and not bp.allow_code():
+        raise HTTPException(400, 'Writing the part as code is switched off on this server '
+                                 '(STLTOSOLID_ALLOW_CODE=0). Pick the recipe mode.')
     missing = bp.sdk_available(body.provider)
     if missing:
         raise HTTPException(503, missing + '.')
@@ -558,53 +575,100 @@ def blueprint_read(job_id: str, body: ReadBody,
     with open(src, 'rb') as f:
         image = f.read()
     stem = _safe_stem(job)
+    d = jobs.job_dir(job_id)
     hints = body.hints
     effort = body.effort
+    mode = body.mode
+    rounds = body.rounds
+    builder = bp.check_builder(d, stem) if rounds or mode != 'recipe' else None
+    log_path = os.path.join(d, 'log.txt')
+
+    def progress(line):
+        # the panel shows the last line while the read runs
+        try:
+            with open(log_path, 'a') as f:
+                f.write(line + '\n')
+        except OSError:
+            pass
 
     def read_fn():
         return read_drawing(image, body.provider, key or '', model=model, base_url=base_url,
-                            hints=hints, timeout=bp.read_timeout(body.provider), effort=effort)
+                            hints=hints, timeout=bp.read_timeout(body.provider), effort=effort,
+                            mode=mode, rounds=rounds, builder=builder, progress=progress,
+                            allow_code=bp.allow_code())
 
     def then_params(res):
-        return {'tool': 'blueprint', 'recipe': res['recipe'], 'title': stem,
-                'read': {k: v for k, v in res.items() if k not in ('recipe', 'raw_text')}}
+        meta = {k: v for k, v in res.items() if k not in ('recipe', 'freeform', 'raw_text')}
+        if res.get('freeform') is not None:
+            ff = res['freeform']
+            return {'tool': 'blueprint', 'code': ff['code'], 'units': ff.get('units') or 'mm',
+                    'freeform': ff, 'title': stem, 'read': meta, 'timeout_s': bp.CODE_TIMEOUT_S}
+        return {'tool': 'blueprint', 'recipe': res['recipe'], 'title': stem, 'read': meta}
 
     try:
         jobs.start_reading(job_id, job.get('filename'), read_fn, then_params)
     except OSError as e:
         raise HTTPException(500, f'Could not start reading: {describe(e)}')
-    return {'id': job_id, 'status': 'reading', 'provider': body.provider, 'model': model}
+    return {'id': job_id, 'status': 'reading', 'provider': body.provider, 'model': model,
+            'mode': mode, 'rounds': rounds}
 
 
 class BuildBody(BaseModel):
-    recipe: dict
+    recipe: Optional[dict] = None
+    # freeform: the (edited) script instead of a recipe, in the drawing's units
+    code: Optional[str] = Field(None, max_length=200000)
+    units: Literal['mm', 'in'] = 'mm'
 
 
 @app.post('/api/blueprints/{job_id}/build')
 def blueprint_build(job_id: str, body: BuildBody):
-    """Build an edited recipe: no model call, the validator first (a
-    refused recipe is a 400 listing what is wrong), then the worker."""
+    """Build an edited recipe or script: no model call. A recipe goes
+    through the validator first (a refused recipe is a 400 listing what is
+    wrong); a script through the allow-list check; then the worker."""
     from stl_to_solid.blueprint import normalize, validate
     job, _ = _drawing_path(job_id)
     if job['status'] in ('reading', 'queued', 'running'):
         raise HTTPException(409, 'This drawing is still being read or built; wait or cancel first.')
+    d = jobs.job_dir(job_id)
+    if body.code is not None:
+        from stl_to_solid.blueprint.freeform import check_code
+        if not bp.allow_code():
+            raise HTTPException(400, 'Writing the part as code is switched off on this server '
+                                     '(STLTOSOLID_ALLOW_CODE=0).')
+        errors = check_code(body.code)
+        if errors:
+            n = len(errors)
+            raise HTTPException(400, f'The script was refused ({n} problem{"s" if n != 1 else ""}): '
+                                     + '; '.join(errors[:5]) + ('; …' if n > 5 else ''))
+        ff = {}
+        try:
+            with open(os.path.join(d, 'freeform.json')) as f:
+                ff = json.load(f)
+        except (OSError, ValueError):
+            pass
+        ff.update(code=body.code, units=body.units)
+        with open(os.path.join(d, 'freeform.json'), 'w') as f:
+            json.dump(ff, f, indent=1)
+        jobs.cleanup_old()
+        try:
+            jobs.start(job_id, job.get('filename'),
+                       {'tool': 'blueprint', 'code': body.code, 'units': body.units, 'freeform': ff,
+                        'title': _safe_stem(job), 'read': _read_meta(d), 'timeout_s': bp.CODE_TIMEOUT_S})
+        except OSError as e:
+            raise HTTPException(500, f'Could not start the build: {describe(e)}')
+        return {'id': job_id, 'status': 'running', 'warnings': []}
+    if body.recipe is None:
+        raise HTTPException(400, 'Send a recipe or a script to build.')
     recipe = normalize(body.recipe)
     rep = validate(recipe)
     if rep.errors:
         n = len(rep.errors)
         raise HTTPException(400, f'The recipe is not valid ({n} problem{"s" if n != 1 else ""}): '
                                  + '; '.join(rep.errors[:5]) + ('; …' if n > 5 else ''))
-    d = jobs.job_dir(job_id)
-    read_meta = None
-    try:
-        with open(os.path.join(d, 'read.json')) as f:
-            read_meta = json.load(f)
-    except (OSError, ValueError):
-        pass
     jobs.cleanup_old()
     try:
         jobs.start(job_id, job.get('filename'),
-                   {'tool': 'blueprint', 'recipe': recipe, 'title': _safe_stem(job), 'read': read_meta})
+                   {'tool': 'blueprint', 'recipe': recipe, 'title': _safe_stem(job), 'read': _read_meta(d)})
     except OSError as e:
         raise HTTPException(500, f'Could not start the build: {describe(e)}')
     return {'id': job_id, 'status': 'running', 'warnings': rep.warnings}
@@ -663,26 +727,44 @@ def blueprint_preview_map(job_id: str):
 
 @app.get('/api/blueprints/{job_id}/recipe')
 def blueprint_recipe(job_id: str):
-    """The last recipe read or built for this drawing (recipe.json) with
-    the read's metadata, so the table can show a recipe whose build was
-    refused or is still running."""
+    """The last answer read or built for this drawing — recipe.json, or
+    freeform.json for a script — with the read's metadata, so the table
+    (or the script box) can show an answer whose build was refused or is
+    still running."""
     _drawing_path(job_id)
     d = jobs.job_dir(job_id)
-    try:
-        with open(os.path.join(d, 'recipe.json')) as f:
-            recipe = json.load(f)
-    except OSError:
+    recipe = freeform = None
+    for name in ('recipe.json', 'freeform.json'):
+        try:
+            with open(os.path.join(d, name)) as f:
+                payload = json.load(f)
+        except OSError:
+            continue
+        except ValueError:
+            raise HTTPException(500, 'The saved answer could not be read; read the drawing again.')
+        if name == 'recipe.json':
+            recipe = payload
+        else:
+            freeform = payload
+    if recipe is None and freeform is None:
         raise HTTPException(404, 'This drawing has not been read yet.')
-    except ValueError:
-        raise HTTPException(500, 'The saved recipe could not be read; read the drawing again.')
-    meta = {}
-    try:
-        with open(os.path.join(d, 'read.json')) as f:
-            meta = json.load(f)
-    except (OSError, ValueError):
-        pass
+    meta = _read_meta(d) or {}
     meta.pop('raw_text', None)
-    return {'id': job_id, 'recipe': recipe, 'read': meta}
+    return {'id': job_id, 'recipe': recipe, 'freeform': freeform, 'read': meta}
+
+
+@app.api_route('/api/blueprints/{job_id}/render/{view}', methods=['GET', 'HEAD'])
+def blueprint_render(job_id: str, view: str):
+    """One of the four pictures of the last full build (what the model
+    compared with the drawing): front, top, right or iso."""
+    from stl_to_solid.blueprint.render import VIEW_ORDER
+    _drawing_path(job_id)
+    if view not in VIEW_ORDER:
+        raise HTTPException(404, f'No such view; the views are {", ".join(VIEW_ORDER)}.')
+    path = os.path.join(jobs.job_dir(job_id), f'render_{view}.png')
+    if not os.path.exists(path):
+        raise HTTPException(404, 'This drawing has not been built yet.')
+    return FileResponse(path, media_type='image/png', headers={'Cache-Control': 'no-store'})
 
 
 # The file routes also answer HEAD (FastAPI does not add it on its own):

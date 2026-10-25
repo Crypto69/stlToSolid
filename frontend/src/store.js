@@ -166,13 +166,23 @@ export const useConvertStore = defineStore('convert', {
     hints: '',
     // how hard the model thinks on a read: 'low' | 'medium' | 'high'
     effort: bpSaved.effort || 'high',
+    // how the part is built: 'auto' (the model decides), 'recipe'
+    // (parametric sketches, the table, a Fusion script) or 'code' (a
+    // CadQuery script the model writes: any shape, STEP only)
+    mode: ['auto', 'recipe', 'code'].includes(bpSaved.mode) ? bpSaved.mode : 'auto',
+    // look-and-fix rounds (the built part is drawn from four sides and the
+    // model compares the pictures with the drawing); null = the server's default
+    rounds: Number.isInteger(bpSaved.rounds) ? bpSaved.rounds : null,
     // model lists fetched from each provider with the user's key: { provider: [{id,label}] },
     // with the last failure's sentence and a busy flag
     models: {},
     modelsBusy: false,
     modelsError: null,
     recipe: null,
-    recipeRead: null,        // { model, provider, usage, seconds, repaired }
+    recipeRead: null,        // { model, provider, usage, seconds, repaired, mode, rounds, triage }
+    freeform: null,          // code mode: { name, units, overall, params, code, notes }
+    renders: [],             // the last full build's pictures: [{ view, file, caption, extent_mm }]
+    renderStamp: 0,          // changes with each build, so the <img> URLs are never cached
     warnings: [],
     bbox: null,
     volume: null,
@@ -197,6 +207,10 @@ export const useConvertStore = defineStore('convert', {
     readStatus: (s) => (s.status !== 'running' ? null : s.serverStatus === 'reading' ? 'reading' : 'building'),
     providerPreset: (s) => (s.blueprintConfig?.providers || []).find((p) => p.key === s.provider) || null,
     hasServerKey: (s) => !!s.providerPreset?.server_key,
+    // the server runs model-written code (STLTOSOLID_ALLOW_CODE); until the
+    // config arrives, assume so
+    allowCode: (s) => s.blueprintConfig?.allow_code !== false,
+    roundsValue: (s) => (s.rounds ?? s.blueprintConfig?.default_rounds ?? 0),
     // the provider takes a user-typed base URL (an OpenAI-compatible server)
     customUrl: (s) => !!s.providerPreset?.custom_url,
     apiKey: (s) => s.apiKeys[s.provider] || '',
@@ -353,7 +367,7 @@ export const useConvertStore = defineStore('convert', {
         status: 'uploading', jobId: null, inputStats: null,
         log: '', result: null, error: null, filename: file.name,
         loftAxisAuto: null, loftAxisScores: null,
-        imageUrl: null, imageSize: null, recipe: null, recipeRead: null, warnings: [],
+        imageUrl: null, imageSize: null, recipe: null, recipeRead: null, freeform: null, renders: [], warnings: [],
         bbox: null, volume: null, overallCheck: null,
         featureList: [], featureMap: null, liveStl: null, liveBusy: false, liveError: null, liveInfo: null,
       })
@@ -699,6 +713,15 @@ export const useConvertStore = defineStore('convert', {
       this.effort = ['low', 'medium', 'high'].includes(e) ? e : 'high'
       saveBp({ effort: this.effort })
     },
+    setMode(m) {
+      this.mode = ['auto', 'recipe', 'code'].includes(m) ? m : 'auto'
+      saveBp({ mode: this.mode })
+    },
+    setRounds(n) {
+      const v = Number(n)
+      this.rounds = Number.isInteger(v) ? Math.max(0, Math.min(this.blueprintConfig?.max_rounds ?? 3, v)) : null
+      saveBp({ rounds: this.rounds })
+    },
     setBaseUrl(u) {
       this.providerBaseUrl = (u || '').trim()
       saveBp({ providerBaseUrl: this.providerBaseUrl })
@@ -712,7 +735,7 @@ export const useConvertStore = defineStore('convert', {
       this.$patch({
         status: 'uploading', jobId: null, inputStats: null, log: '', result: null, error: null,
         cancelled: false, filename: file.name, imageUrl: null, imageSize: null,
-        recipe: null, recipeRead: null, warnings: [], bbox: null, volume: null, overallCheck: null,
+        recipe: null, recipeRead: null, freeform: null, renders: [], warnings: [], bbox: null, volume: null, overallCheck: null,
         featureList: [], featureMap: null, liveStl: null, liveBusy: false, liveError: null, liveInfo: null,
         bodies: [], triangleBody: null, selected: [], hovered: -1, bodiesError: null,
         section: null, xrayTraces: [], xrayTotal: 0, loftAxisAuto: null, loftAxisScores: null,
@@ -748,6 +771,8 @@ export const useConvertStore = defineStore('convert', {
             base_url: this.customUrl ? this.providerBaseUrl : null,
             hints: this.hints || '',
             effort: this.effort,
+            mode: this.mode,
+            rounds: this.roundsValue,
           }),
         })
         if (!res.ok) throw new Error(await errText(res))
@@ -757,8 +782,9 @@ export const useConvertStore = defineStore('convert', {
       }
     },
 
-    // POST /build with an edited recipe: validated, then built; no model call
-    async rebuild(recipe) {
+    // POST /build with an edited answer — { recipe } or { code, units } —
+    // checked, then built; no model call
+    async rebuild(body) {
       if (!this.jobId || this.busy) return
       const before = this.status
       this.$patch({ status: 'running', serverStatus: 'queued', log: '', result: null, error: null,
@@ -766,12 +792,12 @@ export const useConvertStore = defineStore('convert', {
       try {
         const res = await fetch(`/api/blueprints/${this.jobId}/build`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ recipe }),
+          body: JSON.stringify(body),
         })
         if (!res.ok) throw new Error(await errText(res))
         this.startPolling()
       } catch (e) {
-        // a refused recipe (the validator's list): keep the draft, say why
+        // a refused recipe or script (the checker's list): keep the draft, say why
         this.$patch({ status: before === 'running' ? 'ready' : before,
                       error: `Rebuild refused: ${friendlyError(e)}` })
       }
@@ -785,7 +811,8 @@ export const useConvertStore = defineStore('convert', {
         if (!res.ok) return
         const d = await res.json()
         if (job !== this.jobId) return
-        this.recipe = d.recipe
+        this.recipe = d.recipe || null
+        this.freeform = d.freeform || null
         this.recipeRead = d.read || null
         this.warnings = [...(d.read?.validation?.errors || []), ...(d.read?.validation?.warnings || [])]
       } catch { /* the table stays as it was */ }
@@ -794,7 +821,8 @@ export const useConvertStore = defineStore('convert', {
     takeBlueprintResult(r) {
       const rd = r.params?.read || null
       this.$patch({
-        recipe: r.recipe, recipeRead: rd,
+        recipe: r.recipe || null, freeform: r.freeform || null, recipeRead: rd,
+        renders: r.renders || [], renderStamp: Date.now(),
         warnings: [...(rd?.validation?.warnings || []), ...(r.warnings || [])],
         bbox: r.bbox, volume: r.volume_mm3, overallCheck: r.overall_check || null,
         liveStl: null, liveInfo: null, liveError: null,

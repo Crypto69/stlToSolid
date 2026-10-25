@@ -56,11 +56,21 @@ class Provider:
         self.timeout = timeout
 
     def complete(self, system, image_bytes, media_type, text, schema, history=(), effort='high'):
-        """`history`: (role, text) pairs after the first user turn, for the
-        repair round. `effort`: 'low' | 'medium' | 'high', how hard the model
-        thinks (Anthropic output_config.effort; OpenAI reasoning_effort,
-        dropped for a server that rejects it). Returns
-        (text, {'input_tokens', 'output_tokens'}, model)."""
+        """One image and one text in the first user turn. `history`: (role,
+        text) pairs after it, for the repair round. `effort`: 'low' |
+        'medium' | 'high', how hard the model thinks (Anthropic
+        output_config.effort; OpenAI reasoning_effort, dropped for a server
+        that rejects it). Returns (text, {'input_tokens', 'output_tokens'},
+        model)."""
+        return self.complete_parts(system, [('image', image_bytes, media_type), ('text', text)],
+                                   schema, effort=effort, history=history)
+
+    def complete_parts(self, system, parts, schema, effort='high', history=()):
+        """The general form: the first user turn is `parts`, an ordered list
+        of ('text', str) and ('image', bytes, media_type) — the drawing,
+        then captioned pictures of our build in a critique round. The
+        first image is the drawing and is marked for prefix caching where
+        the API has it. Returns as complete()."""
         raise NotImplementedError
 
     def list_models(self):
@@ -98,14 +108,24 @@ class AnthropicProvider(Provider):
         out.sort(key=lambda x: x['created'], reverse=True)
         return out
 
-    def complete(self, system, image_bytes, media_type, text, schema, history=(), effort='high'):
+    def complete_parts(self, system, parts, schema, effort='high', history=()):
         import anthropic
         effort = effort if effort in EFFORTS else 'high'
         client = anthropic.Anthropic(api_key=self.api_key, timeout=self.timeout, max_retries=2)
-        b64 = base64.standard_b64encode(image_bytes).decode('ascii')
-        messages = [{'role': 'user', 'content': [
-            {'type': 'image', 'source': {'type': 'base64', 'media_type': media_type, 'data': b64}},
-            {'type': 'text', 'text': text}]}]
+        content = []
+        first_image = True
+        for part in parts:
+            if part[0] == 'image':
+                b64 = base64.standard_b64encode(part[1]).decode('ascii')
+                block = {'type': 'image', 'source': {'type': 'base64', 'media_type': part[2], 'data': b64}}
+                if first_image:
+                    # the drawing: the same bytes in every round of one read
+                    block['cache_control'] = {'type': 'ephemeral'}
+                    first_image = False
+                content.append(block)
+            else:
+                content.append({'type': 'text', 'text': part[1]})
+        messages = [{'role': 'user', 'content': content}]
         messages += [{'role': r, 'content': t} for r, t in history]
         kwargs = dict(model=self.model, max_tokens=MAX_TOKENS,
                       system=[{'type': 'text', 'text': system, 'cache_control': {'type': 'ephemeral'}}],
@@ -194,16 +214,21 @@ class OpenAICompatibleProvider(Provider):
     def _image(self, url):
         return {'url': url}
 
-    def complete(self, system, image_bytes, media_type, text, schema, history=(), effort='high'):
+    def complete_parts(self, system, parts, schema, effort='high', history=()):
         import openai
         effort = effort if effort in EFFORTS else 'high'
         client = openai.OpenAI(api_key=self.api_key or 'none', base_url=self.base_url,
                                timeout=self.timeout, max_retries=2)
-        b64 = base64.standard_b64encode(image_bytes).decode('ascii')
+        content = []
+        for part in parts:
+            if part[0] == 'image':
+                b64 = base64.standard_b64encode(part[1]).decode('ascii')
+                content.append({'type': 'image_url',
+                                'image_url': self._image(f'data:{part[2]};base64,{b64}')})
+            else:
+                content.append({'type': 'text', 'text': part[1]})
         messages = [{'role': 'system', 'content': self._system(system, schema)},
-                    {'role': 'user', 'content': [
-                        {'type': 'image_url', 'image_url': self._image(f'data:{media_type};base64,{b64}')},
-                        {'type': 'text', 'text': text}]}]
+                    {'role': 'user', 'content': content}]
         messages += [{'role': r, 'content': t} for r, t in history]
         resp = None
         # the OpenAI reasoning knob; a compatible server that does not know it
@@ -306,11 +331,11 @@ class DeepSeekProvider(OpenAICompatibleProvider):
     def _keep_model(self, model_id):
         return 'flash' in model_id.lower()
 
-    def complete(self, system, image_bytes, media_type, text, schema, history=(), effort='high'):
+    def complete_parts(self, system, parts, schema, effort='high', history=()):
         if 'pro' in (self.model or '').lower().split('-'):
             raise ReadError(f'{self.model} does not take images, so it cannot read a drawing. '
                             'Pick deepseek-flash.', 'model')
-        return super().complete(system, image_bytes, media_type, text, schema, history, effort)
+        return super().complete_parts(system, parts, schema, effort, history)
 
     def _system(self, system, schema):
         return (system + '\n\nAnswer with one json object and nothing else: the recipe, '

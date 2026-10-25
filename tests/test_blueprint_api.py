@@ -337,3 +337,137 @@ def test_a_new_provider_is_one_register_call(tmp_path, monkeypatch):
     with _client(tmp_path, monkeypatch) as c:
         cfg = c.get('/api/blueprints/config').json()
         assert [p['key'] for p in cfg['providers']][-1] == 'acme'
+
+
+# ---- freeform (code) mode through the routes --------------------------------------------
+
+GOOD_CODE = 'import cadquery as cq\nresult = cq.Workplane().box(20, 15, 10)'
+
+
+def _fake_code_read(monkeypatch, code=GOOD_CODE, errors=()):
+    """A reader that answers in the code language; records the keyword
+    arguments the route passed (mode, rounds, builder, progress)."""
+    import stl_to_solid.blueprint.read_drawing as rd
+    seen = {}
+
+    def fake(image, provider, key, model=None, base_url=None, hints='', timeout=0, **kw):
+        seen.update(kw)
+        if kw.get('progress'):
+            kw['progress']('running the script…')
+        return {'mode': 'code', 'recipe': None,
+                'freeform': {'name': 'box', 'units': 'mm', 'overall': {'w': 20, 'd': 15, 'h': 10},
+                             'params': [{'name': 'w', 'value': 20, 'source': 'top: 20', 'inferred': False}],
+                             'code': code, 'notes': ['sheet: three views']},
+                'raw_text': '{}', 'usage': {'input_tokens': 11, 'output_tokens': 22, 'calls': 2},
+                'model': 'fake-model', 'provider': provider, 'repaired': False, 'effort': 'high',
+                'rounds_asked': 1, 'rounds': [{'round': 1, 'kind': 'look', 'done': True, 'discrepancies': []}],
+                'triage': None, 'validation': {'errors': list(errors), 'warnings': []}, 'seconds': 0.1}
+    monkeypatch.setattr(rd, 'read_drawing', fake)
+    return seen
+
+
+def test_read_as_code_then_build_then_download(tmp_path, monkeypatch):
+    seen = _fake_code_read(monkeypatch)
+    with _client(tmp_path, monkeypatch) as c:
+        job = _upload(c, _png(tmp_path, 'bracket.png')).json()['id']
+        r = c.post(f'/api/blueprints/{job}/read', json={'provider': 'anthropic', 'mode': 'code', 'rounds': 1},
+                   headers={'X-Api-Key': 'k'})
+        assert r.status_code == 200 and r.json()['mode'] == 'code' and r.json()['rounds'] == 1
+        s = _wait(c, job)
+        assert s['status'] == 'done', s
+        res = s['result']
+        assert res['ok'] and res['kind'] == 'code' and res['parametric'] is False
+        assert res['has_fusion_script'] is False and res['freeform']['code'] == GOOD_CODE
+        assert res['freeform']['name'] == 'box' and res['freeform']['params'][0]['name'] == 'w'
+        assert res['bbox']['size'] == pytest.approx([20, 15, 10], abs=1e-6)
+        assert res['params']['read']['mode'] == 'code' and res['params']['timeout_s'] > 0
+        assert [x['view'] for x in res['renders']] == ['front', 'top', 'right', 'iso']
+        assert 'running the script' in s['log'] and "running the model's script" in s['log']
+        assert seen['mode'] == 'code' and seen['rounds'] == 1 and callable(seen['builder'])
+        assert c.head(f'/api/jobs/{job}/download').status_code == 200
+        assert c.head(f'/api/jobs/{job}/fusion-script').status_code == 404
+        r = c.get(f'/api/blueprints/{job}/render/front')
+        assert r.status_code == 200 and r.headers['content-type'] == 'image/png'
+        assert c.get(f'/api/blueprints/{job}/render/back').status_code == 404
+        rr = c.get(f'/api/blueprints/{job}/recipe').json()
+        assert rr['recipe'] is None and rr['freeform']['code'] == GOOD_CODE and rr['read']['mode'] == 'code'
+        assert rr['read']['rounds'][0]['done'] is True
+        pm = c.get(f'/api/blueprints/{job}/preview-map').json()
+        assert pm['features'][0]['id'] == 'part'
+        # edit the script and run again: no model call, the allow-list first
+        r = c.post(f'/api/blueprints/{job}/build', json={'code': 'import os\nresult = 1', 'units': 'mm'})
+        assert r.status_code == 400 and 'refused' in r.json()['detail']
+        assert c.get(f'/api/jobs/{job}').json()['status'] == 'done'
+        r = c.post(f'/api/blueprints/{job}/build', json={'code': GOOD_CODE.replace('20', '40'), 'units': 'in'})
+        assert r.status_code == 200
+        s = _wait(c, job)
+        assert s['status'] == 'done', s
+        assert s['result']['bbox']['size'][0] == pytest.approx(40 * 25.4, abs=1e-3)
+        assert s['result']['freeform']['units'] == 'in' and s['result']['freeform']['name'] == 'box'
+        assert c.get(f'/api/blueprints/{job}/recipe').json()['freeform']['units'] == 'in'
+
+
+def test_read_as_code_whose_script_fails_keeps_the_script(tmp_path, monkeypatch):
+    bad = 'import cadquery as cq\nresult = cq.Workplane().box(1, 1, 0)'
+    _fake_code_read(monkeypatch, code=bad, errors=['The script failed at line 2: StdFail_NotDone'])
+    with _client(tmp_path, monkeypatch) as c:
+        job = _upload(c, _png(tmp_path)).json()['id']
+        c.post(f'/api/blueprints/{job}/read', json={'provider': 'anthropic', 'mode': 'code'}, headers={'X-Api-Key': 'k'})
+        s = _wait(c, job)
+        assert s['status'] == 'error' and s['result']['failure'] == 'recipe'
+        assert 'does not run' in s['result']['error'] and 'Fix the script' in s['result']['error']
+        rr = c.get(f'/api/blueprints/{job}/recipe')
+        assert rr.status_code == 200 and rr.json()['freeform']['code'] == bad and rr.json()['recipe'] is None
+
+
+def test_code_mode_switched_off(tmp_path, monkeypatch):
+    from backend import blueprint as bp
+    with _client(tmp_path, monkeypatch) as c:
+        cfg = c.get('/api/blueprints/config').json()
+        assert cfg['allow_code'] is True and cfg['default_rounds'] == 0 and cfg['max_rounds'] == 3
+        monkeypatch.setattr(bp, 'ALLOW_CODE', False)
+        assert c.get('/api/blueprints/config').json()['allow_code'] is False
+        job = _upload(c, _png(tmp_path)).json()['id']
+        r = c.post(f'/api/blueprints/{job}/read', json={'provider': 'anthropic', 'mode': 'code'}, headers={'X-Api-Key': 'k'})
+        assert r.status_code == 400 and 'switched off' in r.json()['detail']
+        r = c.post(f'/api/blueprints/{job}/build', json={'code': GOOD_CODE})
+        assert r.status_code == 400 and 'switched off' in r.json()['detail']
+        assert c.post(f'/api/blueprints/{job}/build', json={}).status_code == 400
+        r = c.post(f'/api/blueprints/{job}/read', json={'provider': 'anthropic', 'rounds': 9}, headers={'X-Api-Key': 'k'})
+        assert r.status_code == 422
+
+
+def test_check_builder_runs_both_languages(tmp_path):
+    from backend import blueprint as bp, preview
+    with open(FIX) as f:
+        rec = json.load(f)
+    b = bp.check_builder(str(tmp_path), 'sg90')
+    try:
+        chk = b('recipe', rec)
+        assert chk.ok and chk.solids == 1 and [v for v, _, _ in chk.renders] == ['front', 'top', 'right', 'iso']
+        assert chk.renders[0][1].startswith(b'\x89PNG') and 'FRONT' in chk.renders[0][2]
+        assert chk.bbox['size'] == pytest.approx([32.2, 11.8, 29.9], abs=1e-3)
+        chk = b('code', {'code': GOOD_CODE, 'units': 'in'})
+        assert chk.ok and chk.bbox['size'][0] == pytest.approx(20 * 25.4) and len(chk.renders) == 4
+        assert (tmp_path / 'check' / 'render_iso.png').exists()
+        chk = b('code', {'code': 'import cadquery as cq\nresult = cq.Workplane().box(1, 1, 0)', 'units': 'mm'})
+        assert not chk.ok and 'failed at line 2' in chk.error
+        bad = json.loads(json.dumps(rec))
+        bad['features'][0]['shapes'][0]['w'] = '0'
+        chk = b('recipe', bad)
+        assert not chk.ok and 'w and h' in chk.error
+    finally:
+        preview.helper.close()
+
+
+def test_job_timeout_stops_a_runaway_build(tmp_path, monkeypatch):
+    from backend import blueprint as bp
+    monkeypatch.setattr(bp, 'CODE_TIMEOUT_S', 3.0)
+    with _client(tmp_path, monkeypatch) as c:
+        job = _upload(c, _png(tmp_path)).json()['id']
+        r = c.post(f'/api/blueprints/{job}/build', json={
+            'code': 'import cadquery as cq\nfor i in range(10 ** 12):\n    x = i\nresult = cq.Workplane().box(1, 1, 1)'})
+        assert r.status_code == 200
+        s = _wait(c, job, timeout=120)
+        assert s['status'] == 'error', s
+        assert s['result']['failure'] == 'timeout' and 'longer than 3 s' in s['result']['error']

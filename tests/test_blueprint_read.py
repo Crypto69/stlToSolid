@@ -52,15 +52,20 @@ def test_parse_recipe_text():
 
 
 class Scripted(Provider):
-    """Answers in order; records what it was asked."""
+    """Answers in order; records what it was asked (the texts joined, the
+    images counted, the first image's media type)."""
     def __init__(self, answers):
         super().__init__('k', 'm')
         self.answers = list(answers)
         self.calls = []
 
-    def complete(self, system, image_bytes, media_type, text, schema, history=(), effort='high'):
-        self.calls.append({'system': system, 'text': text, 'history': list(history), 'media': media_type,
-                           'schema': schema, 'effort': effort})
+    def complete_parts(self, system, parts, schema, effort='high', history=()):
+        images = [p for p in parts if p[0] == 'image']
+        self.calls.append({'system': system, 'text': '\n'.join(p[1] for p in parts if p[0] == 'text'),
+                           'history': list(history), 'media': images[0][2] if images else None,
+                           'schema': schema, 'effort': effort, 'n_images': len(images), 'parts': parts})
+        if not self.answers:
+            raise AssertionError('the scripted provider was asked more than it had answers for')
         return self.answers.pop(0), {'input_tokens': 100, 'output_tokens': 50}, 'scripted-1'
 
 

@@ -95,9 +95,102 @@ SCHEMA = _obj({
     'features': {'type': 'array', 'items': FEATURE},
     'views_found': {'type': 'array', 'items': _enum(VIEWS)},
     'notes': {'type': 'array', 'items': {'type': 'string'}},
+    'cannot_express': {'type': 'array', 'items': {'type': 'string'},
+                       'description': 'what the drawing shows that this recipe language cannot build '
+                                      '(an edge fillet, a tilted boss, an arc inside an outline, a '
+                                      'revolved shape), one short item each; empty when nothing'},
+})
+
+# ---- the freeform (code) answers, the triage and the critique rounds -----------
+# Numbers here are plain numbers: none of these schemas has more union-typed
+# fields than the structured-output compilers allow.
+
+UNITS = ('mm', 'in')
+NUMBER = {'type': 'number'}
+FF_PARAM = _obj({
+    'name': {'type': 'string', 'description': 'the variable name at the top of the script'},
+    'value': NUMBER,
+    'source': {'type': 'string', 'description': 'the view and label, or how it was deduced'},
+    'inferred': {'type': 'boolean'},
+}, "one of the script's top-of-file variables, in the drawing's units")
+EXTENT = _obj({'w': NUMBER, 'd': NUMBER, 'h': NUMBER},
+              "bounding box of the finished part in the drawing's units: w along X, d along Y, h along Z")
+
+CODE_SCHEMA = _obj({
+    'name': {'type': 'string', 'description': 'what the part is'},
+    'units': _enum(UNITS, "the drawing's units; the script, params and overall are all in them"),
+    'overall': EXTENT,
+    'params': {'type': 'array', 'items': FF_PARAM},
+    'code': {'type': 'string', 'description': 'the CadQuery script: import cadquery as cq / import math, '
+                                              'named numbers at the top, the finished part assigned to `result`'},
+    'notes': {'type': 'array', 'items': {'type': 'string'}},
+})
+
+TRIAGE_SCHEMA = _obj({
+    'recipe_can_express': {'type': 'boolean',
+                           'description': 'true when every feature on the drawing fits the recipe language'},
+    'why': {'type': 'string', 'description': 'one sentence'},
+    'units': _enum(UNITS + ('unknown',)),
+})
+
+DISCREPANCY = _obj({
+    'where': {'type': 'string', 'description': 'the feature or view'},
+    'what': {'type': 'string', 'description': 'what our build shows against what the drawing says'},
+    'fix': {'type': 'string', 'description': 'what to change'},
+})
+
+CRITIQUE_RECIPE_SCHEMA = _obj({
+    'done': {'type': 'boolean', 'description': 'true when the build matches the drawing'},
+    'discrepancies': {'type': 'array', 'items': DISCREPANCY},
+    'recipe': {'anyOf': [SCHEMA, {'type': 'null'}],
+               'description': 'the whole corrected recipe, or null when done'},
+})
+
+CRITIQUE_CODE_SCHEMA = _obj({
+    'done': {'type': 'boolean', 'description': 'true when the build matches the drawing'},
+    'discrepancies': {'type': 'array', 'items': DISCREPANCY},
+    'code': {'type': 'string', 'description': 'the whole corrected script, or "" when done'},
+    'units': _enum(UNITS),
+    'overall': EXTENT,
+    'params': {'type': 'array', 'items': FF_PARAM},
+    'notes': {'type': 'array', 'items': {'type': 'string'}},
 })
 
 _ID_RE = re.compile(r'[^A-Za-z0-9_]+')
+
+
+def _float_or_none(v):
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if f == f else None
+
+
+def normalize_freeform(ans, previous=None):
+    """A code answer (the first read's or a critique round's) as
+    {name, units, overall, params, code, notes}. A critique round may
+    leave `code` empty (nothing to change) and omit the name: `previous`
+    fills those in."""
+    a = ans if isinstance(ans, dict) else {}
+    prev = previous or {}
+    code = a.get('code')
+    code = code if isinstance(code, str) and code.strip() else prev.get('code', '')
+    units = a.get('units') if a.get('units') in UNITS else prev.get('units', 'mm')
+    ov = a.get('overall') if isinstance(a.get('overall'), dict) else {}
+    overall = {k: _float_or_none(ov.get(k)) for k in ('w', 'd', 'h')}
+    if all(v is None for v in overall.values()) and prev.get('overall'):
+        overall = dict(prev['overall'])
+    params = []
+    for p in a.get('params') if isinstance(a.get('params'), list) else []:
+        if isinstance(p, dict) and p.get('name'):
+            params.append({'name': str(p['name']), 'value': _float_or_none(p.get('value')),
+                           'source': str(p.get('source') or ''), 'inferred': bool(p.get('inferred', False))})
+    if not params and prev.get('params'):
+        params = [dict(p) for p in prev['params']]
+    notes = [str(n) for n in a.get('notes', []) or []] if isinstance(a.get('notes'), list) else []
+    return {'name': str(a.get('name') or prev.get('name') or 'part'), 'units': units, 'overall': overall,
+            'params': params, 'code': code, 'notes': notes or list(prev.get('notes', []))}
 
 
 def _num(v, default):
@@ -165,6 +258,7 @@ def normalize(recipe):
     out['features'] = feats
     out['views_found'] = [str(v) for v in r.get('views_found', []) or []]
     out['notes'] = [str(n) for n in r.get('notes', []) or []]
+    out['cannot_express'] = [str(n) for n in r.get('cannot_express', []) or []]
     return out
 
 

@@ -3,7 +3,8 @@
 One directory per job under DATA_DIR:
     input.<stl|obj>  params.json  output.step  result.json  log.txt
 A Blueprint job holds a drawing instead of a mesh and two more files:
-    input.<jpg|png|webp>  recipe.json  read.json
+    input.<jpg|png|webp>  recipe.json (or freeform.json)  read.json
+plus a check/ directory where the read loop's quick builds go.
 Statuses: created, uploaded, reading (Blueprint: the vision model is
 reading the drawing, no worker yet), queued, running, done, error,
 cancelled.
@@ -129,7 +130,8 @@ def _from_disk(job_id):
 def start(job_id, filename, params):
     """Queue a conversion. Raises OSError when params.json cannot be
     written (a full disk): the caller reports that instead of a job that
-    would never start."""
+    would never start. `params['timeout_s']`, when set, is a wall-clock
+    limit for the worker (model-written code gets one)."""
     d = job_dir(job_id)
     os.makedirs(d, exist_ok=True)
     with open(os.path.join(d, 'params.json'), 'w') as f:
@@ -139,7 +141,8 @@ def start(job_id, filename, params):
             _jobs[job_id] = {'id': job_id, 'created': time.time(), 'proc': None}
         # a fresh run: whatever an earlier run, cancel or read left behind
         # must not hide this run's result
-        _jobs[job_id].update(status='queued', filename=filename, stale_result=False)
+        _jobs[job_id].update(status='queued', filename=filename, stale_result=False,
+                             timeout_s=params.get('timeout_s') or None)
         _jobs[job_id].pop('killed', None)
     threading.Thread(target=_run, args=(job_id,), daemon=True).start()
 
@@ -171,17 +174,27 @@ def start_reading(job_id, filename, read_fn, then_params_fn):
     def go():
         try:
             res = read_fn()
-            recipe = res['recipe']
-            with open(os.path.join(d, 'recipe.json'), 'w') as f:
-                json.dump(recipe, f, indent=1)
-            meta = {k: v for k, v in res.items() if k != 'recipe'}
+            recipe = res.get('recipe')
+            freeform = res.get('freeform')
+            # one answer per read: the other language's file must not linger
+            for name, payload in (('recipe.json', recipe), ('freeform.json', freeform)):
+                path = os.path.join(d, name)
+                if payload is not None:
+                    with open(path, 'w') as f:
+                        json.dump(payload, f, indent=1)
+                else:
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+            meta = {k: v for k, v in res.items() if k not in ('recipe', 'freeform')}
             with open(os.path.join(d, 'read.json'), 'w') as f:
                 json.dump(meta, f, indent=1)
             with open(os.path.join(d, 'log.txt'), 'a') as f:
                 u = meta.get('usage') or {}
-                f.write('read with %s: %s in / %s out tokens in %.1f s\n' % (
-                    meta.get('model'), u.get('input_tokens', '?'), u.get('output_tokens', '?'),
-                    meta.get('seconds') or 0.0))
+                f.write('read with %s (%s): %s in / %s out tokens, %s call(s), in %.1f s\n' % (
+                    meta.get('model'), meta.get('mode', 'recipe'), u.get('input_tokens', '?'),
+                    u.get('output_tokens', '?'), u.get('calls', '?'), meta.get('seconds') or 0.0))
                 for w in (meta.get('validation') or {}).get('warnings', []):
                     f.write('warning: %s\n' % w)
             with _lock:
@@ -195,16 +208,24 @@ def start_reading(job_id, filename, read_fn, then_params_fn):
             errors = (meta.get('validation') or {}).get('errors') or []
             if errors:
                 # read, but not buildable as it stands: the UI shows the
-                # table (via /recipe) so the numbers can be fixed
+                # table or the script (via /recipe) so it can be fixed
                 n = len(errors)
+                if freeform is not None:
+                    message = ('The drawing was read, but the script does not run: %s Fix the script '
+                               'and run it again, or read the drawing again.' % errors[0])
+                else:
+                    message = ('The drawing was read, but %d check%s failed: %s. Fix the values in the '
+                               'table and rebuild.' % (n, 's' if n != 1 else '', '; '.join(errors[:3])))
                 with _lock:
                     job = _jobs.get(job_id)
                     if job is not None:
-                        job.update(status='error', stale_result=True, killed={
-                            'signal': None, 'kind': 'recipe', 'message':
-                            'The drawing was read, but %d check%s failed: %s. Fix the values in the '
-                            'table and rebuild.' % (n, 's' if n != 1 else '', '; '.join(errors[:3]))})
+                        job.update(status='error', stale_result=True,
+                                   killed={'signal': None, 'kind': 'recipe', 'message': message})
                 return
+            with _lock:
+                job = _jobs.get(job_id)
+                if job is not None:
+                    job['append_log'] = True      # the build's log continues the read's
             start(job_id, filename, then_params_fn(res))
         except Exception as e:
             log.warning('job %s: reading the drawing failed: %s', job_id, describe(e))
@@ -230,6 +251,12 @@ def _worker_cmd():
     if _FROZEN:
         return [sys.executable, '--worker']
     return [sys.executable, '-u', '-m', 'backend.worker']
+
+
+def _worker_cwd():
+    """The repository root, so `-m backend.worker` resolves; a frozen build
+    finds its modules itself."""
+    return None if _FROZEN else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _own_group():
@@ -309,20 +336,21 @@ def _run_guarded(job_id):
                 return
             job['status'] = 'running'
             input_name = job.get('input') or 'input.stl'
+            timeout = job.get('timeout_s')
+            log_mode = 'ab' if job.pop('append_log', False) else 'wb'
         # a stale result.json from an earlier run must never be read as
         # this run's answer if the worker dies before writing its own
         try:
             os.remove(os.path.join(d, 'result.json'))
         except OSError:
             pass
-        with open(os.path.join(d, 'log.txt'), 'wb') as logf:
+        with open(os.path.join(d, 'log.txt'), log_mode) as logf:
             proc = subprocess.Popen(
                 _worker_cmd() + [
                     os.path.join(d, input_name), os.path.join(d, 'output.step'),
                     os.path.join(d, 'params.json'), os.path.join(d, 'result.json')],
                 stdout=logf, stderr=subprocess.STDOUT,
-                cwd=None if _FROZEN else os.path.dirname(
-                    os.path.dirname(os.path.abspath(__file__))),
+                cwd=_worker_cwd(),
                 **_own_group())
         with _lock:
             _jobs[job_id]['proc'] = proc
@@ -331,7 +359,17 @@ def _run_guarded(job_id):
             late_cancel = _jobs[job_id].get('cancelling', False)
         if late_cancel:
             _kill_tree(proc, hard=True)
-        code = proc.wait()
+        timed_out = False
+        try:
+            # the worker stops a script itself after timeout_s when it can
+            # and reports why; 15 s later it is stopped from here regardless
+            code = proc.wait(timeout=timeout + 15) if timeout else proc.wait()
+        except subprocess.TimeoutExpired:
+            # the worker's own timer did not get a turn (a kernel call that
+            # never yields): stop it from here
+            _kill_tree(proc, hard=True)
+            code = proc.wait()
+            timed_out = True
         with _lock:
             job = _jobs.get(job_id)
             if job is None:
@@ -351,6 +389,12 @@ def _run_guarded(job_id):
             # even a traceback: the log simply stops. Without this the UI
             # can only say "see log", and the log is empty by definition.
             job['killed'] = _killed_by(code)
+            if timed_out:
+                job['status'] = 'error'
+                job['stale_result'] = True
+                job['killed'] = {'signal': None, 'kind': 'timeout', 'message':
+                                 f'The build ran longer than {timeout:.0f} s and was stopped (an endless '
+                                 'loop, or a boolean the geometry kernel cannot finish).'}
 
 
 # Signals that mean the worker was killed rather than failing on its own.
