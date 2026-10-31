@@ -267,3 +267,15 @@ def test_scan_ladder_skips_pre_reduce_for_small_scans(tmp_path, monkeypatch):
                      worker=_fake_scan_worker)
     calls = [line.split() for line in log.read_text().splitlines()]
     assert [c[0] for c in calls] == ['close']
+
+
+def test_sealed_scan_rebuilds_without_pymeshlab():
+    """The desktop apps ship without pymeshlab (GPL): a scan that is
+    already sealed must still decimate to a closed mesh."""
+    import trimesh
+    from stl_to_solid.mesh_prep import _simplify_rebuild
+    m = trimesh.creation.icosphere(subdivisions=6, radius=20)   # 81,920 faces
+    out = _simplify_rebuild(m, target_faces=4000, verbose=False)
+    assert out.is_watertight
+    assert len(out.faces) <= 4000
+    assert out.volume == pytest.approx(m.volume, rel=0.01)
