@@ -215,8 +215,6 @@ def load_and_prep_bodies(path, target_faces=40000, verbose=True,
         return [Body(repair(groups[0].mesh, is_scan, target_faces, verbose))], \
             is_scan, n_dropped
 
-    if is_scan:
-        _require_pymeshlab()   # fail once, loudly, not once per body
     if keep is not None:
         wanted = [g for g in groups if keep(g)]
         if not wanted:
@@ -345,7 +343,9 @@ def classify(m, verbose=True, scan_dihedral_deg=SCAN_DIHEDRAL_DEG,
 def repair(m, is_scan, target_faces=40000, verbose=True):
     """Close and normalise one body: Poisson/stitch ladder for scans, hole
     filling for leaky CAD exports, consistent outward normals for all."""
-    if is_scan:
+    if is_scan and not _has_pymeshlab():
+        m = _simplify_rebuild(m, target_faces, verbose)
+    elif is_scan:
         m = _poisson_rebuild(m, target_faces, verbose)
     elif not m.is_watertight:
         trimesh.repair.fill_holes(m)
@@ -680,6 +680,43 @@ def _open_edges(d):
     """
     import trimesh as tm
     return len(tm.grouping.group_rows(d.edges_sorted, require_count=1))
+
+
+def _has_pymeshlab():
+    try:
+        import pymeshlab  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _simplify_rebuild(m, target_faces, verbose):
+    """Scan repair without pymeshlab (GPL, so not in the desktop apps).
+
+    No hole stitching or Poisson here, just trimesh hole filling and a
+    fast_simplification decimation. That is enough for a scan that is
+    already sealed (most sculpt and slicer exports are); a torn scan still
+    needs the full ladder, so it fails with the install hint.
+    """
+    import fast_simplification as fs
+
+    m = _clean(m)
+    if not m.is_watertight:
+        _require_pymeshlab()
+    if len(m.faces) > target_faces:
+        v, f = fs.simplify(m.vertices.astype(np.float32),
+                           m.faces.astype(np.int64),
+                           target_reduction=1 - target_faces / len(m.faces))
+        d = _clean(trimesh.Trimesh(v, f, process=False))
+        # fast_simplification can break manifoldness; a sealed full-size
+        # mesh beats an open small one.
+        if d.is_watertight:
+            m = d
+        elif verbose:
+            print("[prep] decimation opened the mesh; keeping it at full size")
+    if verbose:
+        print(f"[prep] scan rebuild (no pymeshlab) -> {len(m.faces)} faces")
+    return m
 
 
 def _require_pymeshlab():
