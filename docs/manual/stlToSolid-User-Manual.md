@@ -574,13 +574,17 @@ Add-Ins** instead. The Text Commands palette says where.
 
 1. **Insert → Insert Mesh**, and set the units to mm.
 2. For a single section or a stack: make a construction plane where you
-   want the cut (**Construct → Offset Plane**), or use any flat face.
+   want the cut (**Construct → Offset Plane**), or use any flat face. For
+   an X-Ray: two parallel planes, or one plane and a click on the mesh.
 3. **Mesh** tab → **Modify** → **Mesh to Outline**.
+
+![A scanned controller with two offset planes through it](img/fusion-planes.jpg)
+*Ready for an X-Ray: the mesh and two planes, before the dialog is open.*
 
 ### 7.3 The settings
 
 ![The Mesh to Outline dialog](img/fusion-dialog.jpg)
-*The dialog in X-Ray mode. The values shown are from one run on a leaky scanned controller, not the defaults. Fusion cuts the labels short. The full names are in the table below.*
+*The dialog in X-Ray mode with nothing picked yet, showing the defaults. Fusion cuts the labels short. The full names are in the table below.*
 
 | Setting | Default | What it does |
 |---|---|---|
@@ -601,12 +605,12 @@ Add-Ins** instead. The Text Commands palette says where.
 
 ### 7.4 Walk-through: from mesh to solid with X-Ray
 
-This is a real run on a scanned controller: 21 slices, 2 mm apart, then
-extruded into one body.
+These are real runs on a scanned controller. The setup shot is 10 slices,
+4 mm apart. The other shots are 21 slices, 2 mm apart, extruded into one body.
 
 **1. Pick two planes.** Set **Action** to **X-Ray (start → end)**, choose
 the mesh body, and pick a Start and an End. Set the **Spacing**. The info
-line says how many slices that makes (here 21, from +0.00 to +40.00 mm).
+line says how many slices that makes (here 10, from +0.00 to +35.00 mm).
 Tick **Extrude each slice** if you want a solid, then click **OK**.
 
 ![Step 1: the dialog with a start and an end plane](img/fusion-1-setup.jpg)
