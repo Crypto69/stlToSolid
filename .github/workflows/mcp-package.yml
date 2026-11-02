@@ -56,9 +56,10 @@ jobs:
       - name: Drive it over stdio like a client
         shell: bash
         run: |
-          wheel="$(ls dist/*.whl)"
+          # pwd -W: the Windows form of the path, since this goes through Python to uvx
+          wheel="$(pwd -W 2>/dev/null || pwd)/$(ls dist/*.whl)"
           uv run --no-project --python 3.12 --with "mcp>=2.3,<3" python tools/mcp_smoke.py -- \
-            uvx --python 3.12 --from "stltosolid[mcp] @ $PWD/$wheel" stltosolid-mcp
+            uvx --python 3.12 --from "stltosolid[mcp] @ $wheel" stltosolid-mcp
 
   bundle:
     needs: smoke
