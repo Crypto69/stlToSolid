@@ -35,7 +35,7 @@ def compile_recipe(recipe, out_dir, title=None, stem='output'):
     with open(os.path.join(out_dir, 'preview_features.json'), 'w') as f:
         json.dump(feature_colours(b, mesh), f)
     script = os.path.join(out_dir, f'{stem}_fusion.py')
-    with open(script, 'w') as f:
+    with open(script, 'w', encoding='utf-8') as f:
         f.write(emit_fusion_blueprint_script(r, title=title or r['name']))
     with open(os.path.join(out_dir, 'recipe.json'), 'w') as f:
         json.dump(r, f, indent=1)

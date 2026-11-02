@@ -146,7 +146,7 @@ def build_server(cfg):
     from stl_to_solid.service import jobs
     os.makedirs(cfg.jobs_dir, exist_ok=True)
     jobs.DATA_DIR = cfg.jobs_dir
-    os.environ[jobs.WORKER_WATCH_ENV] = '1'
+    os.environ[jobs.WORKER_WATCH_ENV] = str(os.getpid())
     jobs.cleanup_old()
     # a folder the caller named on a tool this session, so its files can be
     # handed to Fusion afterwards

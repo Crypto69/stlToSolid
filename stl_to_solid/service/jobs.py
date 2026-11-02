@@ -271,12 +271,14 @@ def _own_group():
 
 def worker_stdin():
     """Popen kwargs for a worker's stdin. With STLTOSOLID_WORKER_DIES_WITH_PARENT
-    set (the MCP server: a client can kill it at any moment) the worker stops
-    when this process ends, so an hour-long conversion does not outlive the
-    session that asked for it. POSIX: it gets a pipe nobody writes to, which
-    the system closes however the parent ends. Windows: it waits on the
-    parent's process handle (see worker._die_with_parent), so stdin is nothing."""
-    if os.environ.get(WORKER_WATCH_ENV) != '1':
+    set to this process's id (the MCP server: a client can kill it at any
+    moment) the worker stops when this process ends, so an hour-long conversion
+    does not outlive the session that asked for it. POSIX: it gets a pipe nobody
+    writes to, which the system closes however the parent ends. Windows: it
+    waits on the handle of that process (see worker._die_with_parent), so stdin
+    is nothing. The id is passed because a venv's python.exe on Windows is a
+    launcher, which would otherwise be the parent the worker sees."""
+    if not os.environ.get(WORKER_WATCH_ENV):
         return {}
     return {'stdin': subprocess.DEVNULL if _WINDOWS else subprocess.PIPE}
 

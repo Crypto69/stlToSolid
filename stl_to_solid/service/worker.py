@@ -59,7 +59,8 @@ def _die_with_parent():
     pool has its own watchdog on this process."""
     import threading
     from .jobs import WORKER_WATCH_ENV
-    if os.environ.get(WORKER_WATCH_ENV) != '1':
+    watched = os.environ.get(WORKER_WATCH_ENV)
+    if not watched:
         return
     if os.name == 'nt':
         # Not a pipe: a blocking read holds the C runtime's lock on the file
@@ -70,7 +71,7 @@ def _die_with_parent():
         kernel.OpenProcess.argtypes = (ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32)
         kernel.WaitForSingleObject.argtypes = (ctypes.c_void_p, ctypes.c_uint32)
         SYNCHRONIZE, INFINITE = 0x00100000, 0xFFFFFFFF
-        handle = kernel.OpenProcess(SYNCHRONIZE, 0, os.getppid())
+        handle = kernel.OpenProcess(SYNCHRONIZE, 0, int(watched))
         if not handle:
             return            # cannot watch it: finish the conversion regardless
 

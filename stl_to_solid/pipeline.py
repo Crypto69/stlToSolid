@@ -824,7 +824,7 @@ def _write_script(builds, out_path, write_script, verbose, pool=None):
         # sketches + Loft); there is no CadQuery script for this mode.
         try:
             from .fusion_export import emit_fusion_loft_script
-            with open(fpath, 'w') as f:
+            with open(fpath, 'w', encoding='utf-8') as f:
                 f.write(emit_fusion_loft_script(builds))
             if verbose:
                 print(f"[out] Fusion 360 loft script -> {fpath}")
@@ -843,14 +843,14 @@ def _write_script(builds, out_path, write_script, verbose, pool=None):
         from .script_export import emit_script
         py_path = os.path.splitext(out_path)[0] + '.py'
         text = emit_script(builds, os.path.basename(out_path))
-        with open(py_path, 'w') as f:
+        with open(py_path, 'w', encoding='utf-8') as f:
             f.write(text)
         if verbose:
             print(f"[out] CadQuery script -> {py_path}")
         fusion = None
         try:
             from .fusion_export import emit_fusion_script
-            with open(fpath, 'w') as f:
+            with open(fpath, 'w', encoding='utf-8') as f:
                 f.write(emit_fusion_script(builds))
             fusion = fpath
             if verbose:
@@ -958,7 +958,7 @@ def _write_bfill_script(builds, out_path, verbose, pool=None):
             print(f"[out] Boundary Fill script export failed ({type(e).__name__}: {e})")
         return None, None
     fpath = os.path.splitext(out_path)[0] + '_fusion_bfill.py'
-    with open(fpath, 'w') as f:
+    with open(fpath, 'w', encoding='utf-8') as f:
         f.write(text)
     if verbose:
         print(f"[out] Fusion 360 Boundary Fill script -> {fpath}")

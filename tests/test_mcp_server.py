@@ -321,7 +321,7 @@ def test_worker_dies_with_a_killed_server(tmp_path, cfg, part):
         'from stl_to_solid.service import jobs\n'
         f'jobs.DATA_DIR = {cfg.jobs_dir!r}\n'
         'os.makedirs(jobs.DATA_DIR, exist_ok=True)\n'
-        'os.environ[jobs.WORKER_WATCH_ENV] = "1"\n'
+        'os.environ[jobs.WORKER_WATCH_ENV] = str(os.getpid())\n'
         'import subprocess\n'
         'p = subprocess.Popen([sys.executable, "-c", "import time; from stl_to_solid.service import worker; '
         'worker._die_with_parent(); print(\'up\', flush=True); time.sleep(120)"], '
@@ -350,6 +350,21 @@ def _alive(pid):
     # the child's own parent is gone by now, so nothing reaps it: a zombie counts as gone
     out = subprocess.run(['ps', '-o', 'stat=', '-p', str(pid)], capture_output=True, text=True).stdout.strip()
     return bool(out) and not out.startswith('Z')
+
+
+def test_scripts_are_utf8_on_every_system(cfg, part):
+    """Fusion's Python reads a script as UTF-8. A script written in the local
+    code page (the default on Windows) with one em dash in it will not run."""
+    async def go(c):
+        res = (await c.call_tool('convert_mesh', {'path': part, 'wait_s': 55})).structured_content
+        while not res['finished']:
+            res = (await c.call_tool('job_status', {'job_id': res['job_id']})).structured_content
+        return res
+    res = drive(cfg, go)
+    for kind in ('fusion_script', 'cadquery_script'):
+        with open(res['files'][kind], 'rb') as f:
+            data = f.read().decode('utf-8')          # raises if it is not
+        compile(data, kind, 'exec')
 
 
 def test_a_worker_crash_is_a_sentence(cfg, tmp_path, monkeypatch):

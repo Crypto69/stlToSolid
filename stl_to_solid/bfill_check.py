@@ -304,7 +304,7 @@ def check_script(text, budget_s=None, pool=None, workers=2, progress=None):
         import tempfile
         with tempfile.TemporaryDirectory(prefix='stltosolid-bfill-') as td:
             path = os.path.join(td, 'script.py')
-            with open(path, 'w') as f:
+            with open(path, 'w', encoding='utf-8') as f:
                 f.write(text)
             deadline = time.monotonic() + budget_s if budget_s else None
             got = pool.run(_check_body_task,

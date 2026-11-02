@@ -267,7 +267,7 @@ def compile_code(code, out_dir, units='mm', title=None, stem='output', quick=Fal
     from .render import coarse_mesh, render_views, write_renders
     shape, warnings = run_script(code, units)
     os.makedirs(out_dir, exist_ok=True)
-    with open(os.path.join(out_dir, 'code.py'), 'w') as f:
+    with open(os.path.join(out_dir, 'code.py'), 'w', encoding='utf-8') as f:
         f.write(code if code.endswith('\n') else code + '\n')
     name = title or 'Blueprint'
     solids = shape.Solids()
