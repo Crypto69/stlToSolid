@@ -583,32 +583,28 @@ Add-Ins** instead. The Text Commands palette says where.
 
 | Setting | Default | What it does |
 |---|---|---|
+| **Action** | Single slice | Choose this first: it decides which picks the dialog asks for. **Single slice**: a single sketch on the plane. **Stack (count + direction)**: several sketches on offset planes. **X-Ray (start → end)**: a stack between two picks, like the app's X-Ray. Switching clears the picks the new action does not use. |
 | **Mesh body** | — | The mesh body to cut. |
-| **Plane** | — | A construction plane or a flat face to cut on. In X-Ray mode it is optional: it only sets the slice direction (see below). |
+| **Plane** | — | Single slice and Stack: a construction plane or a flat face to cut on. |
+| **Start / End** | — | X-Ray only: where the stack starts and ends. Pick a construction plane or a flat face, or click on the mesh. The slices run parallel to the Start plane, or the End plane if Start is a mesh click, so at least one must be a plane or a flat face of a solid, and two planes must be parallel. A click on a flat mesh face across the slice direction snaps to that face (just inside the material, so the cut catches it). A click anywhere else takes the height of the spot clicked. The end is always included, and start past end is fine. |
+| **Spacing** | 0.2 mm | Stack and X-Ray: the distance between sketches. |
+| **Sections** (count) | 10 | Stack only: how many sketches, 2 to 400. |
+| **Direction** | Along the plane normal (+) | Stack only: along the plane's normal (+), against it (−), or both sides of it. |
+| *(info line)* | — | X-Ray only: how many slices your picks and spacing make, and between which heights. |
 | **Fit tolerance** | 0.08 mm | How far a fitted curve may sit off the raw section. |
 | **Join gaps up to** | 2.5 mm | Loose ends closer than this are joined, so an outline broken only by hairline cracks between surface patches comes back as one closed profile. `0` draws exactly what Fusion's own mesh section draws. Raise it if the outline still comes back in pieces. Lower it if two unrelated pieces got joined. |
 | **Trim slivers up to** | 0 mm | Where the mesh has a double skin, the outline goes out and back along the same path and Fusion makes thin sliver profiles. Slivers narrower than this are cut out before fitting. `0.3` is a good start on a leaky mesh. `0` leaves the outline as traced. |
 | **Outline only** | off | Just the outer outline. Loose open pieces and inner loops (holes, islands) are skipped, so each sketch is one clean profile to extrude. The summary still says how many were skipped. |
-| **Sections** | One | **One**: a single sketch on the plane. **Stack (count + direction)**: several sketches on offset planes. **X-Ray (start → end)**: a stack between two picks, like the app's X-Ray. |
-| **Spacing** | 0.2 mm | Stack and X-Ray: the distance between sketches. |
-| **Sections** (count) | 10 | Stack only: how many sketches, 2 to 400. |
-| **Direction** | Along the plane normal (+) | Stack only: along the plane's normal (+), against it (−), or both sides of it. |
-| **Start / End** | — | X-Ray only: where the stack starts and ends. Pick a construction plane or flat face parallel to the slicing plane, or click on the mesh. A click on a flat mesh face across the slice direction snaps to that face (just inside the material, so the cut catches it). A click anywhere else takes the height of the spot clicked. The end is always included, and start past end is fine. |
 | **Extrude each slice** | off | Stack and X-Ray: each sketch's profile is extruded to the next slice and joined into one body, a stepped solid. Use this instead of Loft, which usually fails between two complex profiles. With Outline only ticked, only the outer shape is extruded. Without it, inner loops are filled as well. At 0.5 mm spacing the steps are hard to see. |
-| *(info line)* | — | X-Ray only: how many slices your picks and spacing make, and between which heights. |
 | **Hide mesh after** | off | Hides the mesh body when it is done, so you can see the result. |
-
-**The plane in X-Ray mode.** If you leave **Plane** empty, the slices run
-parallel to the Start plane (or the End plane). You need a Plane only when
-both Start and End are clicks on the mesh.
 
 ### 7.4 Walk-through: from mesh to solid with X-Ray
 
 This is a real run on a scanned controller: 21 slices, 2 mm apart, then
 extruded into one body.
 
-**1. Pick two planes.** Choose the mesh body, set **Sections** to **X-Ray
-(start → end)**, and pick a Start and an End. Set the **Spacing**. The info
+**1. Pick two planes.** Set **Action** to **X-Ray (start → end)**, choose
+the mesh body, and pick a Start and an End. Set the **Spacing**. The info
 line says how many slices that makes (here 21, from +0.00 to +40.00 mm).
 Tick **Extrude each slice** if you want a solid, then click **OK**.
 
