@@ -5,7 +5,6 @@ import asyncio
 import base64
 import json
 import os
-import signal
 import subprocess
 import sys
 import time
@@ -334,17 +333,23 @@ def test_worker_dies_with_a_killed_server(tmp_path, cfg, part):
     line = parent.stdout.readline().split()
     assert line[0] == 'up'
     child = int(line[1])
-    os.kill(child, 0)                            # alive
-    parent.send_signal(signal.SIGKILL)
+    assert _alive(child)
+    parent.kill()
     parent.wait()
     for _ in range(40):
-        try:
-            os.kill(child, 0)
-        except ProcessLookupError:
+        if not _alive(child):
             return
         time.sleep(0.25)
-    os.kill(child, signal.SIGKILL)
     pytest.fail('the worker outlived the server')
+
+
+def _alive(pid):
+    if os.name == 'nt':
+        out = subprocess.run(['tasklist', '/FI', f'PID eq {pid}', '/NH'], capture_output=True, text=True).stdout
+        return str(pid) in out
+    # the child's own parent is gone by now, so nothing reaps it: a zombie counts as gone
+    out = subprocess.run(['ps', '-o', 'stat=', '-p', str(pid)], capture_output=True, text=True).stdout.strip()
+    return bool(out) and not out.startswith('Z')
 
 
 def test_a_worker_crash_is_a_sentence(cfg, tmp_path, monkeypatch):
@@ -358,3 +363,50 @@ def test_runner_reports_a_timeout(cfg, part):
     os.makedirs(cfg.jobs_dir, exist_ok=True)
     with pytest.raises(runner.CallFailed, match='longer than'):
         runner.call(cfg, 'inspect_mesh', part, timeout=0.01)
+
+
+def test_command_forms(tmp_path):
+    """Both ways in reach the server, and a missing extra is a sentence."""
+    from stl_to_solid import __version__
+    for cmd in ([sys.executable, '-m', 'stl_to_solid_mcp', '--version'],
+                [sys.executable, '-c', 'import sys; from stl_to_solid.pipeline import main; '
+                 'sys.argv = ["stltosolid", "mcp", "--version"]; main()']):
+        out = subprocess.run(cmd, capture_output=True, text=True, cwd=str(tmp_path))
+        assert out.stdout.strip() == __version__, out.stderr
+    blocked = ('import sys; sys.modules["mcp"] = None; sys.modules["mcp.server"] = None; '
+               'sys.modules["mcp.server.mcpserver"] = None\n'
+               'import builtins; real = builtins.__import__\n'
+               'def fake(name, *a, **k):\n'
+               '    if name.split(".")[0] == "mcp": raise ModuleNotFoundError("no", name="mcp")\n'
+               '    return real(name, *a, **k)\n'
+               'builtins.__import__ = fake\n'
+               'from stl_to_solid_mcp.cli import main; main([])')
+    out = subprocess.run([sys.executable, '-c', blocked], capture_output=True, text=True, cwd=str(tmp_path))
+    assert out.returncode != 0 and 'stltosolid[mcp]' in out.stderr and 'Traceback' not in out.stderr
+
+
+def test_registry_entry_matches_the_package():
+    """server.json and the bundle state a version and a command: they must
+    be this package's, or a release publishes something that cannot start."""
+    from stl_to_solid import __version__
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, 'server.json')) as f:
+        doc = json.load(f)
+    assert doc['version'] == __version__
+    pypi = next(p for p in doc['packages'] if p['registryType'] == 'pypi')
+    assert pypi['version'] == __version__ and pypi['identifier'] == 'stltosolid'
+    assert pypi['packageArguments'][0]['value'] == 'mcp'
+    with open(os.path.join(root, 'README.md')) as f:
+        assert 'mcp-name: ' + doc['name'] in f.read()
+    with open(os.path.join(root, 'packaging', 'mcpb', 'manifest.json')) as f:
+        manifest = json.load(f)
+    assert manifest['version'] == __version__
+    tools = {t.name for t in asyncio.run(_list_tools())}
+    assert {t['name'] for t in manifest['tools']} == tools
+
+
+async def _list_tools():
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        async with Client(build_server(C.from_args(out=d, allow_code=True))) as c:
+            return (await c.list_tools()).tools

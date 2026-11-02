@@ -61,6 +61,13 @@ jobs:
           uv run --no-project --python 3.12 --with "mcp>=2.3,<3" python tools/mcp_smoke.py -- \
             uvx --python 3.12 --from "stltosolid[mcp] @ $wheel" stltosolid-mcp
 
+      - name: The MCP test suite on this system
+        shell: bash
+        run: |
+          wheel="$(pwd -W 2>/dev/null || pwd)/$(ls dist/*.whl)"
+          uv run --no-project --python 3.12 --with "stltosolid[mcp] @ $wheel" --with pytest --with httpx \
+            python -m pytest tests/test_mcp_server.py tests/test_mcp_http.py -q
+
   bundle:
     needs: smoke
     runs-on: ubuntu-latest

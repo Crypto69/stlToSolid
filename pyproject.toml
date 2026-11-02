@@ -50,7 +50,7 @@ Issues = "https://github.com/Crypto69/stlToSolid/issues"
 
 [project.scripts]
 stltosolid = "stl_to_solid.pipeline:main"
-stltosolid-mcp = "stl_to_solid_mcp.server:main"
+stltosolid-mcp = "stl_to_solid_mcp.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["stl_to_solid*"]

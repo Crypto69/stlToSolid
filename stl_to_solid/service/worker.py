@@ -54,25 +54,44 @@ def _pick_shells(in_path, picked):
 
 
 def _die_with_parent():
-    """Stop when the parent's pipe on stdin closes (see jobs.worker_stdin).
-    Exits hard: the conversion's state is worthless once nobody is waiting,
-    and the shell pool has its own watchdog on this process."""
+    """Stop when the parent process ends (see jobs.worker_stdin). Exits hard:
+    the conversion's state is worthless once nobody is waiting, and the shell
+    pool has its own watchdog on this process."""
     import threading
     from .jobs import WORKER_WATCH_ENV
-
-    def watch():
-        # os.read, not sys.stdin: a daemon thread parked inside the buffered
-        # reader holds its lock, which is a fatal error at interpreter exit
-        try:
-            while os.read(fd, 4096):
-                pass
-        except OSError:
-            return
-        os._exit(3)
-
-    if os.environ.get(WORKER_WATCH_ENV) != '1' or sys.stdin is None:
+    if os.environ.get(WORKER_WATCH_ENV) != '1':
         return
-    fd = sys.stdin.fileno()
+    if os.name == 'nt':
+        # Not a pipe: a blocking read holds the C runtime's lock on the file
+        # descriptor, and the rest of the worker then hangs on that lock.
+        import ctypes
+        kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+        kernel.OpenProcess.restype = ctypes.c_void_p
+        kernel.OpenProcess.argtypes = (ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32)
+        kernel.WaitForSingleObject.argtypes = (ctypes.c_void_p, ctypes.c_uint32)
+        SYNCHRONIZE, INFINITE = 0x00100000, 0xFFFFFFFF
+        handle = kernel.OpenProcess(SYNCHRONIZE, 0, os.getppid())
+        if not handle:
+            return            # cannot watch it: finish the conversion regardless
+
+        def watch():
+            kernel.WaitForSingleObject(handle, INFINITE)
+            os._exit(3)
+    else:
+        if sys.stdin is None:
+            return
+        fd = sys.stdin.fileno()
+
+        def watch():
+            # os.read, not sys.stdin: a daemon thread parked inside the buffered
+            # reader holds its lock, which is a fatal error at interpreter exit
+            try:
+                while os.read(fd, 4096):
+                    pass
+            except OSError:
+                return
+            os._exit(3)
+
     threading.Thread(target=watch, daemon=True).start()
 
 
