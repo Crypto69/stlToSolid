@@ -183,6 +183,16 @@ const convertLabel = computed(() => {
       </div>
       <p class="tag micro">Mesh in · solid out</p>
       <ToolBar @new="fileInput.click()" />
+      <a
+        class="help-link"
+        href="https://stltosolid.com/docs/"
+        target="_blank"
+        rel="noopener"
+        title="Help: open the stlToSolid manual"
+        aria-label="Help: open the stlToSolid manual"
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M9.4 9.3a2.7 2.7 0 0 1 5.2.9c0 1.8-2.6 2.2-2.6 4" /><path d="M12 17.3h.01" /></svg>
+      </a>
       <p v-if="build" class="build micro" :title="'built ' + build.built">
         v{{ build.version }} · {{ build.commit }}
         <span v-if="build.built !== 'unknown'" class="when">· {{ build.built }}</span>
@@ -442,6 +452,25 @@ const convertLabel = computed(() => {
   background: var(--panel);
 }
 .topbar > nav { align-self: center; margin-left: 8px; }
+.help-link {
+  align-self: center;
+  display: inline-flex;
+  flex: none;
+  padding: 3px;
+  border-radius: 50%;
+  color: var(--muted);
+}
+.help-link:hover, .help-link:focus-visible { color: var(--edge); background: var(--panel-2); }
+.help-link svg {
+  display: block;
+  width: 24px;
+  height: 24px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
 .wordmark {
   font-weight: 800;
   font-size: 17px;
