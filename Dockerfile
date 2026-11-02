@@ -24,7 +24,8 @@ WORKDIR /app
 # deliberately, then rebuild.
 COPY pyproject.toml README.md LICENSE constraints.txt ./
 COPY stl_to_solid/ stl_to_solid/
-RUN pip install --no-cache-dir --timeout 300 --retries 10 -c constraints.txt '.[scan,blueprint]' fastapi 'uvicorn[standard]' python-multipart
+COPY stl_to_solid_mcp/ stl_to_solid_mcp/
+RUN pip install --no-cache-dir --timeout 300 --retries 10 -c constraints.txt '.[scan,blueprint,mcp]' fastapi 'uvicorn[standard]' python-multipart
 COPY backend/ backend/
 COPY --from=webbuild /build/dist frontend/dist
 
@@ -41,4 +42,6 @@ ENV STLTOSOLID_DATA=/data
 ENV STLTOSOLID_WORKERS=2
 VOLUME /data
 EXPOSE 8000
+# the MCP server is the same image with another command: see docker-compose.yml
+EXPOSE 8322
 CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]

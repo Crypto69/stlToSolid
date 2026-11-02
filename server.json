@@ -1,0 +1,30 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.Crypto69/stltosolid",
+  "title": "stlToSolid",
+  "description": "Turn STL and OBJ meshes and dimensioned drawings into real CAD solids and Fusion 360 scripts.",
+  "websiteUrl": "https://stltosolid.com",
+  "repository": { "url": "https://github.com/Crypto69/stlToSolid", "source": "github" },
+  "version": "0.6.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "stltosolid",
+      "version": "0.6.0",
+      "runtimeHint": "uvx",
+      "runtimeArguments": [
+        { "type": "named", "name": "--python", "value": "3.12" },
+        { "type": "named", "name": "--from", "value": "stltosolid[mcp]" }
+      ],
+      "packageArguments": [
+        { "type": "positional", "value": "stltosolid-mcp", "valueHint": "command" }
+      ],
+      "transport": { "type": "stdio" },
+      "environmentVariables": [
+        { "name": "STLTOSOLID_OUT", "description": "Folder for results (default ~/stlToSolid/mcp-output)", "format": "filepath", "isRequired": false },
+        { "name": "STLTOSOLID_MCP_ALLOW_CODE", "description": "Set to 1 to enable build_cadquery, which runs model-written CadQuery under an allow-list", "format": "boolean", "isRequired": false }
+      ]
+    }
+  ]
+}
