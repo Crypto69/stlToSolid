@@ -1,0 +1,133 @@
+# The stltosolid wheel and the MCP server: built once, proven on a clean Mac,
+# Windows and Linux machine, and on a v* tag published to PyPI, the GitHub
+# release and the MCP Registry. No secrets: PyPI and the registry both trust
+# this workflow through GitHub's OIDC identity.
+name: Package and MCP server
+
+on:
+  push:
+    branches: [main, feature/mcp-server]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Version on a tag must match the package
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          want="$(sed -n "s/__version__ = '\(.*\)'/\1/p" stl_to_solid/__init__.py)"
+          test "${GITHUB_REF_NAME#v}" = "$want"
+      - run: uv build
+      - name: Nothing but the package in the wheel
+        run: |
+          unzip -l dist/*.whl | awk '{print $4}' | grep -E '/|\.' | grep -v -E '^(stl_to_solid/|stl_to_solid_mcp/|stltosolid-[0-9.]+\.dist-info/|Name$|----$)' && exit 1 || true
+      - uses: actions/upload-artifact@v4
+        with: { name: dist, path: dist/* }
+
+  smoke:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/download-artifact@v4
+        with: { name: dist, path: dist }
+      - name: Libraries the geometry kernel links against
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgl1 libglu1-mesa libxrender1 libxext6 libsm6 libx11-6 fontconfig
+      - name: Install from nothing and self-check
+        shell: bash
+        run: |
+          wheel="$(ls dist/*.whl)"
+          start=$SECONDS
+          uvx --python 3.12 --from "stltosolid[mcp] @ ./$wheel" stltosolid-mcp --check
+          echo "cold install and check: $((SECONDS - start)) s"
+      - name: Drive it over stdio like a client
+        shell: bash
+        run: |
+          # pwd -W: the Windows form of the path, since this goes through Python to uvx
+          wheel="$(pwd -W 2>/dev/null || pwd)/$(ls dist/*.whl)"
+          uv run --no-project --python 3.12 --with "mcp>=2.3,<3" python tools/mcp_smoke.py -- \
+            uvx --python 3.12 --from "stltosolid[mcp] @ $wheel" stltosolid-mcp
+
+      - name: The MCP test suite on this system
+        shell: bash
+        run: |
+          wheel="$(pwd -W 2>/dev/null || pwd)/$(ls dist/*.whl)"
+          uv run --no-project --python 3.12 --with "stltosolid[mcp] @ $wheel" --with pytest --with httpx \
+            python -m pytest tests/test_mcp_server.py tests/test_mcp_http.py -q
+
+  bundle:
+    needs: smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: python3 tools/build_mcpb.py --out bundle
+      - uses: actions/upload-artifact@v4
+        with: { name: mcpb, path: bundle/*.mcpb }
+
+  docker:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the image the NAS runs
+        run: docker build -t stltosolid .
+      - name: The remote server answers, and asks for its token
+        run: |
+          docker run -d --name mcp -p 8322:8322 -e STLTOSOLID_MCP_TOKEN=ci-token stltosolid \
+            stltosolid-mcp --http --host 0.0.0.0 --port 8322 --root /data/mcp --base-url http://localhost:8322
+          for i in $(seq 1 30); do curl -sf http://localhost:8322/healthz && break; sleep 2; done
+          curl -sf http://localhost:8322/healthz
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8322/files/x.stl)" = 401
+          # a real file in and back out, so the shared folder is writable in the image
+          printf 'solid box\nendsolid box\n' > box.stl
+          curl -sf -T box.stl -H 'Authorization: Bearer ci-token' http://localhost:8322/files/box.stl
+          curl -sf -H 'Authorization: Bearer ci-token' http://localhost:8322/files/uploads/box.stl | cmp - box.stl
+          docker logs mcp
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [smoke, bundle, docker]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: write   # the GitHub release
+      id-token: write   # PyPI and the MCP Registry
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/download-artifact@v4
+        with: { name: dist, path: dist }
+      - name: Publish to PyPI
+        run: uv publish --trusted-publishing always dist/*
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Build the bundle, attach it to the release, and record its address and hash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          python3 tools/build_mcpb.py --out release --release-url "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/stltosolid-$ver.mcpb"
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" release/*.mcpb --clobber
+      - name: Publish to the MCP Registry
+        run: |
+          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
+          ./mcp-publisher login github-oidc
+          # PyPI takes a moment to show a new release, and the registry reads it there
+          for i in 1 2 3 4 5 6 7 8 9 10; do ./mcp-publisher publish && exit 0; sleep 30; done
+          exit 1

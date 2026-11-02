@@ -1,0 +1,67 @@
+{
+  "manifest_version": "0.4",
+  "name": "stltosolid",
+  "display_name": "stlToSolid",
+  "version": "0.6.0",
+  "description": "Turn STL and OBJ meshes and dimensioned drawings into real CAD solids: STEP files and Fusion 360 scripts.",
+  "long_description": "stlToSolid gives an AI assistant the tools of the stlToSolid app. It can look at a mesh, convert it to a STEP with true planes, cylinders and fillets, loft smooth shapes, trace cross-sections into Fusion 360 sketches, and build a parametric part from a drawing it reads.\n\nFirst start: the geometry kernel is a large download, about 2.8 GB, and the first start takes a few minutes. Later starts take under a second.\n\nFree for personal, hobby, educational and research use (PolyForm Noncommercial 1.0.0). Commercial use needs the author's permission.",
+  "author": { "name": "Chris Venter", "url": "https://stltosolid.com" },
+  "homepage": "https://stltosolid.com",
+  "documentation": "https://stltosolid.com/docs/",
+  "support": "https://github.com/Crypto69/stlToSolid/issues",
+  "repository": { "type": "git", "url": "https://github.com/Crypto69/stlToSolid" },
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "keywords": ["stl", "step", "mesh", "cad", "fusion-360", "3d-printing"],
+  "icon": "icon.png",
+  "server": {
+    "type": "uv",
+    "entry_point": "src/server.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": ["run", "--directory", "${__dirname}", "src/server.py", "--out", "${user_config.out_dir}"],
+      "env": { "STLTOSOLID_MCP_ALLOW_CODE": "${user_config.allow_code}" }
+    }
+  },
+  "user_config": {
+    "out_dir": {
+      "type": "directory",
+      "title": "Results folder",
+      "description": "Where STEP files and Fusion scripts are saved. Nothing is ever overwritten.",
+      "required": true,
+      "default": "${HOME}/stlToSolid/mcp-output"
+    },
+    "allow_code": {
+      "type": "boolean",
+      "title": "Allow the CadQuery tool",
+      "description": "Lets the assistant run CadQuery scripts it writes, for shapes a recipe cannot draw. Scripts run in their own process under an allow-list, with a time limit and no file access.",
+      "default": false
+    }
+  },
+  "tools": [
+    { "name": "inspect_mesh", "description": "Look at a mesh: size, bodies, and a suggested method." },
+    { "name": "convert_mesh", "description": "Convert a mesh to a STEP solid." },
+    { "name": "job_status", "description": "Where a conversion or build stands." },
+    { "name": "cancel_job", "description": "Stop a running conversion or build." },
+    { "name": "suggest_loft_axis", "description": "Which axis a loft would slice along." },
+    { "name": "trace_section", "description": "Slice a mesh at one plane and see the outline." },
+    { "name": "plan_xray", "description": "Where a stack of section planes would go." },
+    { "name": "xray_fusion_script", "description": "A Fusion 360 script with one sketch per slice." },
+    { "name": "inspect_step", "description": "Read a STEP back the way CAD will." },
+    { "name": "preview_recipe", "description": "Check a Blueprint recipe and draw it from four sides." },
+    { "name": "build_recipe", "description": "Build a recipe into a STEP and a parametric Fusion script." },
+    { "name": "build_cadquery", "description": "Run a CadQuery script under an allow-list and write a STEP. Off unless enabled." },
+    { "name": "fusion_handoff", "description": "The Python to run a result through Autodesk's Fusion MCP server." }
+  ],
+  "tools_generated": true,
+  "prompts": [
+    { "name": "convert-for-fusion", "description": "Inspect a mesh, convert it and check the result.", "arguments": ["path"], "text": "Convert ${arguments.path} into a solid I can model against in Fusion 360." },
+    { "name": "read-drawing", "description": "Build a part from a dimensioned drawing.", "arguments": ["drawing_path"], "text": "Build a part from the drawing at ${arguments.drawing_path}." },
+    { "name": "xray-to-fusion", "description": "Trace cross-sections into Fusion sketches.", "arguments": ["path"], "text": "Make Fusion 360 cross-section sketches of ${arguments.path}." },
+    { "name": "send-to-fusion", "description": "Run a result in the open Fusion design.", "arguments": ["path"], "text": "Put ${arguments.path} into my open Fusion 360 design." }
+  ],
+  "prompts_generated": true,
+  "compatibility": {
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": { "python": ">=3.11,<3.14" }
+  }
+}

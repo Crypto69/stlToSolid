@@ -4,12 +4,24 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "stltosolid"
-version = "0.5.9"
+version = "0.6.0"
 description = "Convert STL/OBJ meshes into prismatic STEP solids via extrusion-structure recognition, with a faceted-BREP fallback"
 readme = "README.md"
+authors = [{ name = "Chris Venter" }]
+keywords = ["stl", "step", "mesh", "cad", "fusion-360", "cadquery", "mcp", "model-context-protocol"]
+classifiers = [
+    "Intended Audience :: Manufacturing",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Visualization",
+]
 license = "PolyForm-Noncommercial-1.0.0"
 license-files = ["LICENSE"]
-requires-python = ">=3.10"
+requires-python = ">=3.11,<3.14"
 dependencies = [
     "numpy",
     "trimesh",
@@ -26,9 +38,19 @@ dependencies = [
 scan = ["pymeshlab"]
 # Blueprint: reading a drawing with a vision model (the web app's 4th tool)
 blueprint = ["anthropic>=1", "openai>=1", "pillow"]
+# The MCP server (stltosolid-mcp), for AI clients: pillow draws the pictures
+# its tools answer with. No vision-model SDK: the client's model reads drawings.
+mcp = ["mcp>=2.3,<3", "pillow"]
+
+[project.urls]
+Homepage = "https://stltosolid.com"
+Documentation = "https://stltosolid.com/docs/"
+Source = "https://github.com/Crypto69/stlToSolid"
+Issues = "https://github.com/Crypto69/stlToSolid/issues"
 
 [project.scripts]
 stltosolid = "stl_to_solid.pipeline:main"
+stltosolid-mcp = "stl_to_solid_mcp.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["stl_to_solid*"]

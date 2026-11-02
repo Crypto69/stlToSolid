@@ -304,7 +304,7 @@ def check_script(text, budget_s=None, pool=None, workers=2, progress=None):
         import tempfile
         with tempfile.TemporaryDirectory(prefix='stltosolid-bfill-') as td:
             path = os.path.join(td, 'script.py')
-            with open(path, 'w') as f:
+            with open(path, 'w', encoding='utf-8') as f:
                 f.write(text)
             deadline = time.monotonic() + budget_s if budget_s else None
             got = pool.run(_check_body_task,
@@ -337,7 +337,7 @@ def _check_body_task(task):
     """In a worker: the dry run of one body of a script."""
     path = task['script']
     if _NS_CACHE.get('path') != path:
-        with open(path) as f:
+        with open(path, encoding='utf-8') as f:
             _NS_CACHE.update(path=path, ns=parse_script(f.read()))
     ns = _NS_CACHE['ns']
     res = check_body(ns['BODIES'][task['index']], ns)

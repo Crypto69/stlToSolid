@@ -352,15 +352,11 @@ async def xray(job_id: str, axis: str = 'z', frm: float = Query(0.0, alias='from
     fit): the count and whether it is over the script's limit."""
     _check_slice_params(axis, 0.08, 0, 0, step)
     _, src = _input_path(job_id)
-    from .sections import half_extent, XRAY_MAX
-    from stl_to_solid.section_fit import stack_offsets
+    from stl_to_solid.service.xray import plan
     try:
-        h = await run_in_threadpool(half_extent, src, axis, units, scale)
+        return await run_in_threadpool(plan, src, axis, frm, to, step, units, scale)
     except Exception as e:
         raise HTTPException(400, f'Could not read the mesh: {describe(e)}')
-    offs = stack_offsets(frm, to, step, h)
-    return {'axis': axis, 'from': frm, 'to': to, 'step': step, 'half_extent': h,
-            'offsets': offs, 'count': len(offs), 'max': XRAY_MAX, 'over_cap': len(offs) > XRAY_MAX}
 
 
 @app.get('/api/jobs/{job_id}/xray-script')
@@ -379,59 +375,21 @@ async def xray_script(job_id: str, axis: str = 'z', frm: float = Query(0.0, alia
     XRAY_MAX slices and XRAY_BUDGET_S seconds of fitting."""
     _check_slice_params(axis, tol, join, trim, step)
     job, src = _input_path(job_id)
-    from .sections import half_extent, trace_stack, XRAY_MAX
-    from stl_to_solid.section_fit import stack_offsets, stack_extrudes, STACK_EDGE_MM
-    from stl_to_solid.fusion_export import emit_fusion_xray_script
+    from stl_to_solid.service import xray as _xray
     try:
-        h = await run_in_threadpool(half_extent, src, axis, units, scale)
+        p = await run_in_threadpool(_xray.plan, src, axis, frm, to, step, units, scale)
     except Exception as e:
         raise HTTPException(400, f'Could not read the mesh: {describe(e)}')
-    offs = stack_offsets(frm, to, step, h)
-    if len(offs) > XRAY_MAX:
-        raise HTTPException(400, f'{len(offs)} slices is over the limit of {XRAY_MAX}; raise the '
-                                 'spacing or narrow the range')
+    if p['over_cap']:
+        raise HTTPException(400, _xray.over_cap_message(p['count']))
     try:
-        secs = await run_in_threadpool(trace_stack, src, axis, offs, tol, units, scale, join,
-                                       outline, trim, XRAY_BUDGET_S)
+        s = await run_in_threadpool(_xray.script, src, axis, frm, to, step, p['offsets'], tol, units,
+                                    scale, join, outline, trim, extrude, XRAY_BUDGET_S)
     except TimeoutError as e:
         raise HTTPException(400, str(e))
     except Exception as e:
         raise HTTPException(400, f'Could not trace the sections: {describe(e)}')
-    n = len(secs)
-    exts = [None] * n
-    if extrude:
-        # the offsets ascend, so every slab goes towards +axis
-        far = secs[-1]['centre'] + secs[-1]['extent'] / 2.0 - STACK_EDGE_MM
-        exts = stack_extrudes([s['at'] for s in secs], step, far)
-    sections = []
-    for i, sec in enumerate(secs):
-        sections.append({'origin': sec['origin'], 'normal': sec['normal'],
-                         'name': f"xray {axis.upper()}={sec['at']:.2f} mm ({i + 1}/{n})",
-                         'loops': sec['loops'], 'open': sec['open'],
-                         'areas_mm2': sec.get('areas_mm2', []), 'extrude_mm': exts[i]})
-    notes = []
-    n_trim = sum(1 for s in secs if s['stats'].get('trimmed'))
-    if n_trim:
-        k = sum(s['stats']['trimmed'] for s in secs)
-        notes.append(f"{k} sliver{'s' if k != 1 else ''} trimmed in {n_trim} of {n} slices "
-                     f"(Trim slivers up to {trim:g} mm); if the part has real walls that thin, "
-                     "lower it")
-    n_br = [s for s in secs if s['stats'].get('bridged')]
-    if n_br:
-        k = sum(s['stats']['bridged'] for s in n_br)
-        big = max(s['stats'].get('bridge_max', 0.0) for s in n_br)
-        notes.append(f"outline closed across {k} mesh gap{'s' if k != 1 else ''} in {len(n_br)} of "
-                     f"{n} slices (largest {big:.2f} mm): holes in the mesh skin, filled with a "
-                     "straight wall")
-    from stl_to_solid.section_fit import open_outline_note
-    open_note = open_outline_note([(f"{axis.upper()}={s['at']:.2f} mm", s['stats']) for s in secs], join)
-    if open_note:
-        notes.insert(0, 'WARNING: ' + open_note)
-    lo, hi = sorted((frm, to))
-    title = f'X-Ray {axis.upper()} {lo:+.1f}..{hi:+.1f} mm every {step:g} mm'
-    text = emit_fusion_xray_script(sections, title=title, notes=notes)
-    suffix = '_solid' if extrude and n > 1 else ''
-    return _py_attachment(text, f'{_safe_stem(job)}_xray_{axis}{lo:+.1f}_{hi:+.1f}_s{step:g}{suffix}.py')
+    return _py_attachment(s['text'], _safe_stem(job) + s['name'])
 
 
 # ---------------------------------------------------------------------------

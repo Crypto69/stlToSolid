@@ -5,7 +5,7 @@
 <h1 align="center">stlToSolid — User Manual</h1>
 
 <p align="center"><b>Mesh in · solid out</b><br>
-Version 0.5.8 · October 2026</p>
+Version 0.6.0 · November 2026</p>
 
 ---
 
@@ -24,6 +24,7 @@ Version 0.5.8 · October 2026</p>
 | 9 | [Using the results in Fusion 360](#9-using-the-results-in-fusion-360) | How to import the STEP and run the downloaded scripts. |
 | 10 | [Troubleshooting](#10-troubleshooting) | Common problems and how to fix them. |
 | 11 | [Quick reference](#11-quick-reference) | File types, default settings and output files at a glance. |
+| 12 | [Using stlToSolid from an AI assistant](#12-using-stltosolid-from-an-ai-assistant) | Connect Claude, Cursor or another MCP client, so it can inspect and convert meshes and build parts from drawings for you. |
 
 ---
 
@@ -793,3 +794,151 @@ Text Commands**.
 ---
 
 <p align="center"><sub>stlToSolid 0.5.8 · Licensed under PolyForm Noncommercial 1.0.0 · Fusion 360 is a trademark of Autodesk, Inc. stlToSolid is not affiliated with Autodesk.</sub></p>
+
+---
+
+## 12. Using stlToSolid from an AI assistant
+
+stlToSolid can run as an **MCP server**. MCP (Model Context Protocol) is the way AI
+assistants such as Claude and Cursor use outside tools. Connect it once, then ask
+in plain words: *"Convert ~/Downloads/bracket.stl to a STEP and tell me how close it
+is to the mesh."*
+
+The server runs on your own computer, like the app. Your files are not uploaded by
+stlToSolid. What the assistant reads, such as the report and the slice pictures,
+goes to whichever AI service you use, as with anything else you show it. You need no
+API key here: drawings are read by the assistant you are already talking to.
+
+### 12.1 Installing
+
+You need [uv](https://docs.astral.sh/uv/), a small Python installer. It fetches the
+right Python by itself.
+
+**Step 1: test it in a terminal.** The first run downloads the geometry kernel, about
+2.8 GB, and takes a few minutes. Many assistants give up on a server that takes this
+long to start, so do this first. It also tells you whether everything works.
+
+```
+uvx --python 3.12 --from "stltosolid[mcp]" stltosolid-mcp --check
+```
+
+**Step 2: connect your assistant.**
+
+*Claude Code:*
+
+```
+claude mcp add stltosolid -- uvx --python 3.12 --from "stltosolid[mcp]" stltosolid-mcp
+```
+
+*Claude Desktop, Cursor and others:* add this to the client's MCP settings. In Claude
+Desktop that is **Settings → Developer → Edit Config**. Restart the client afterwards.
+
+```json
+{
+  "mcpServers": {
+    "stltosolid": {
+      "command": "uvx",
+      "args": ["--python", "3.12", "--from", "stltosolid[mcp]", "stltosolid-mcp"]
+    }
+  }
+}
+```
+
+*Claude Desktop, one click:* download `stltosolid-<version>.mcpb` from the
+[Releases](https://github.com/Crypto69/stlToSolid/releases/latest) page and open it.
+It asks where results should go.
+
+*With the desktop app installed:* the app contains the server, so no download is
+needed. Point the client at the app with the `--mcp` flag.
+
+On a Mac:
+
+```
+/Applications/stlToSolid.app/Contents/MacOS/stlToSolid --mcp
+```
+
+On Windows:
+
+```
+C:\path\to\stlToSolid\stlToSolid.exe --mcp
+```
+
+### 12.2 What the assistant can do
+
+| Tool | What it does |
+|---|---|
+| `inspect_mesh` | Size, triangle count, bodies, a warning if the units look wrong, and a suggested method. |
+| `convert_mesh` | Mesh → Solid or Sliced Loft, with every setting from the app. Gives a STEP, and Fusion and CadQuery scripts where they exist. |
+| `job_status`, `cancel_job` | Follow or stop a long conversion. |
+| `suggest_loft_axis` | Which axis a loft would slice along. |
+| `trace_section` | One slice, as a picture the assistant can see, with the fitted curves counted. |
+| `plan_xray`, `xray_fusion_script` | X-Ray: where the planes fall, and the Fusion script of real sketches. |
+| `inspect_step` | Reads a STEP back the way CAD will: solids, faces, surface types, volume, closed or not. |
+| `preview_recipe`, `build_recipe` | Blueprint: draws a recipe from four sides, then builds the STEP and parametric Fusion script. |
+| `build_cadquery` | Blueprint's code mode, for bends and blends. **Off by default**, see below. |
+| `fusion_handoff` | The Python that puts a result into Fusion through Autodesk's own MCP server. |
+
+There are also four ready-made prompts your client may show in its menu:
+`convert-for-fusion`, `read-drawing`, `xray-to-fusion` and `send-to-fusion`.
+
+### 12.3 Long conversions
+
+A big part can take many minutes. The assistant gets an answer after 45 seconds with a
+job number, and keeps asking until the job is done. The work carries on in the
+meantime, one conversion at a time. If you quit the assistant, its conversion stops
+too, so nothing keeps running unseen.
+
+### 12.4 Where files go
+
+Results go in one folder per part under `~/stlToSolid/mcp-output`. Change it with
+`--out` or `STLTOSOLID_OUT`. A file is never overwritten: a second run writes
+`part-2.step`.
+
+To limit which files the server may read, start it with `--root <folder>`.
+
+### 12.5 Allowing the code tool
+
+`build_cadquery` runs a CadQuery script the assistant writes. It handles shapes the
+recipe cannot draw. It is off unless you start the server with `--allow-code`, or set
+`STLTOSOLID_MCP_ALLOW_CODE=1`, or tick the box in the Claude Desktop bundle.
+
+Scripts may only use `cadquery` and `math`, have no file access, run in their own
+process and stop after two minutes. Turn it on only with an assistant you trust.
+
+### 12.6 Sending results straight into Fusion
+
+Autodesk has its own Fusion MCP server. Turn it on in Fusion under **Preferences →
+General → API**, and connect it to the same assistant. Then ask: *"Put that part in my
+open design."* The assistant uses `fusion_handoff` here and Autodesk's script tool
+there. Fusion can undo the result.
+
+### 12.7 Running it on a NAS or server
+
+The Docker image contains the server too, off by default. Choose a long random token
+and start it:
+
+```
+STLTOSOLID_MCP_TOKEN=your-long-random-token STLTOSOLID_MCP_URL=http://your-nas:8322 docker compose --profile mcp up -d
+```
+
+Clients connect to `http://your-nas:8322/mcp` and send the token as a bearer token. A
+remote server cannot see your disk, so files live in the folder `data/mcp` on the
+server:
+
+- **Get a file in:** copy it into a share of that folder, or send it:
+  `curl -T part.stl -H "Authorization: Bearer your-long-random-token" http://your-nas:8322/files/part.stl`
+- **Tell the assistant** the path it reports, such as `uploads/part.stl`.
+- **Get results out:** every result comes with a download link.
+
+Use this only on a network you trust, because the connection is not encrypted. Put an
+HTTPS proxy in front of it for anything wider.
+
+### 12.8 If it does not work
+
+| Problem | What to do |
+|---|---|
+| The assistant says the server failed to start | Run the `--check` command in a terminal. The first download takes minutes, and clients give up sooner. |
+| `uvx: command not found` | Install [uv](https://docs.astral.sh/uv/). If it is installed and the client still cannot find it, use the full path to `uvx` in the settings. |
+| A path is refused | The server needs absolute paths. On Windows that means `C:\Users\...`. Check `--root` if you set one. |
+| "Still running" for a long time | That is normal for a large part. Ask the assistant to keep checking, or to cancel and convert fewer bodies. |
+| It ran out of memory | Convert fewer bodies at once: the `bodies` setting takes the numbers from `inspect_mesh`. |

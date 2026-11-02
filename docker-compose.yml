@@ -62,3 +62,31 @@ services:
     # keep a runaway conversion from starving the NAS's other services
     mem_limit: 12g
     restart: unless-stopped
+
+  # The MCP server for AI clients on other machines. Off unless asked for:
+  #   STLTOSOLID_MCP_TOKEN=... docker compose --profile mcp up -d
+  # Clients connect to http://<this machine>:8322/mcp and send that token as a
+  # bearer token. Files live in ./data/mcp: share that folder, or send files
+  # with PUT /files/<name>. Results come back with download links.
+  stltosolid-mcp:
+    image: stltosolid:latest
+    profiles: [mcp]
+    command:
+      - stltosolid-mcp
+      - --http
+      - --host=0.0.0.0
+      - --port=8322
+      - --root=/data/mcp
+      - --base-url=${STLTOSOLID_MCP_URL:-http://localhost:8322}
+    ports:
+      - "8322:8322"
+    volumes:
+      - ./data:/data
+    environment:
+      # required: the server refuses a network port with no token
+      STLTOSOLID_MCP_TOKEN: "${STLTOSOLID_MCP_TOKEN:-}"
+      STLTOSOLID_WORKERS: "${STLTOSOLID_WORKERS:-2}"
+      # 1 lets clients run model-written CadQuery under the allow-list
+      STLTOSOLID_MCP_ALLOW_CODE: "${STLTOSOLID_MCP_ALLOW_CODE:-0}"
+    mem_limit: 12g
+    restart: unless-stopped
