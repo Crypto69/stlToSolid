@@ -337,7 +337,7 @@ def _check_body_task(task):
     """In a worker: the dry run of one body of a script."""
     path = task['script']
     if _NS_CACHE.get('path') != path:
-        with open(path) as f:
+        with open(path, encoding='utf-8') as f:
             _NS_CACHE.update(path=path, ns=parse_script(f.read()))
     ns = _NS_CACHE['ns']
     res = check_body(ns['BODIES'][task['index']], ns)
