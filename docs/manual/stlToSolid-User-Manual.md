@@ -851,10 +851,17 @@ It asks where results should go.
 *With the desktop app installed:* the app contains the server, so no download is
 needed. Point the client at the app with the `--mcp` flag.
 
-| System | Command |
-|---|---|
-| Mac | `/Applications/stlToSolid.app/Contents/MacOS/stlToSolid --mcp` |
-| Windows | `C:\path\to\stlToSolid\stlToSolid.exe --mcp` |
+On a Mac:
+
+```
+/Applications/stlToSolid.app/Contents/MacOS/stlToSolid --mcp
+```
+
+On Windows:
+
+```
+C:\path\to\stlToSolid\stlToSolid.exe --mcp
+```
 
 ### 12.2 What the assistant can do
 
