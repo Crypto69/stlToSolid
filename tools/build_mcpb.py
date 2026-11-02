@@ -33,6 +33,7 @@ def npx(*args, cwd):
 
 
 def build(ver, out_dir):
+    out_dir = os.path.abspath(out_dir)        # the packer runs from a scratch folder
     with tempfile.TemporaryDirectory() as tmp:
         d = os.path.join(tmp, 'bundle')
         shutil.copytree(SRC, d)
