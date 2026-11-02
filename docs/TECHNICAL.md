@@ -380,6 +380,57 @@ Boundary Fill dry run two bodies at a time; the log ends with a `[time]`
 line giving the wall clock per stage (conversion, STEP write, scripts and
 dry run).
 
+## MCP server (v0.6)
+
+`stltosolid-mcp` (the `mcp` extra) exposes the engine to AI clients: 13 tools,
+4 resources plus 2 per-job templates, and 4 prompts. Install and client setup are in
+[the manual, section 12](manual/stlToSolid-User-Manual.md#12-using-stltosolid-from-an-ai-assistant).
+
+**Layout.** `stl_to_solid_mcp/` holds the server. `stl_to_solid/service/` holds what
+the web API and the server share: the job registry, the worker, mesh and STEP analysis,
+section tracing, the preview helper and the X-Ray script builder. `backend/` keeps the
+HTTP routes; its old module names are aliases of the service modules.
+
+**Isolation.** The server process holds no geometry. Short questions go to a one-shot
+worker (`service/calls.py`, `runner.call`), and conversions and builds go through the
+job registry, one at a time. A kernel crash or a mesh that eats the memory costs a
+worker and comes back as a sentence. The server imports in about 0.4 s because
+`stl_to_solid/__init__.py` no longer imports the pipeline.
+
+**Long jobs.** A long tool blocks for `wait_s` (default 45 s, because a client's request
+timeout is often 60 s), then answers with `job_id` and `finished: false`; `job_status`
+blocks for up to 55 s per call and sends the last log line as progress. The MCP Tasks
+extension is the eventual replacement, but python-sdk 2.3.0 lists it as not implemented.
+
+**Workers die with the server.** With `STLTOSOLID_WORKER_DIES_WITH_PARENT=1` (set by the
+server) a worker gets a stdin pipe nobody writes to, and exits when it closes. The OS
+closes it however the parent ends, so a killed client leaves no hour-long job behind.
+
+**Files.** Inputs are checked by extension and, with `--root`, by location. Results are
+copied from the job's scratch folder (`<out>/.jobs/<id>`, cleared after a day) to
+`<out>/<stem>/` once, recorded in the job's `mcp.json`, so a restarted server still
+delivers a finished job. Names that exist get `-2`, `-3`.
+
+**Blueprint.** The client's model reads the drawing, so the provider layer and keys stay
+out of this path. `read-drawing` hands it the same reading rules the app uses, and
+`preview_recipe` the four renders. Bench on `ttt-universal-bracket.jpeg`, read by Opus 5.5
+with the code tool and no look-and-fix round, 2026-11-02: 0.37501 lb, 4.126 x 2.750 x
+3.045 in, 37 faces, against a reference of 0.3750 lb and the same box; the in-app loop gave
+0.366 lb and a misread shape. One drawing, and the reader had seen the reference numbers
+first, so it shows the path works and does not rank the two.
+
+**Remote mode.** `--http` serves Streamable HTTP. A non-loopback address needs a bearer
+token. Paths become relative to `--root`, results carry URLs, and `GET`/`PUT /files/...`
+move files. `build_cadquery` stays off unless asked for.
+
+**Install size.** Measured 2026-11-02 on macOS arm64 with an empty uv cache: 76 packages,
+2.8 GB on disk (cadquery brings VTK, casadi and numba), about 110 s to download and run
+`--check`, of which the first kernel import is most. A warm `uvx` start takes 0.45 s.
+
+**Client roots are not enforced.** Roots describe the project a client is working on, and
+a user converting `~/Downloads/part.stl` from a repo session is the normal case. `--root`
+is the limit for anyone who wants one.
+
 ## How it works
 
 The pipeline implements the classical reverse-engineering architecture

@@ -181,3 +181,15 @@ These apply to several vendor firmwares; check the equivalents on yours.
 | Errors mentioning pymeshlab / Qt on scan uploads | The image installs `libgl1 libglu1-mesa libxrender1 libxext6 libsm6 libx11-6 fontconfig libcom-err2 libp11-kit0 libgpg-error0`; `docker compose exec stltosolid python -c "import pymeshlab"` should print nothing. Rebuild with `--no-cache` if not. |
 | UI loads but every API call 404s | Stale image — `docker compose build --no-cache`. |
 | Port already in use | Change the left side of `ports:` in compose (and the `tailscale serve` target). |
+
+## MCP server for AI clients (optional)
+
+The image also contains the MCP server. It stays off until you ask for its profile,
+and it refuses to listen on the network without a token:
+
+```
+STLTOSOLID_MCP_TOKEN=your-long-random-token STLTOSOLID_MCP_URL=http://your-nas:8322 docker compose --profile mcp up -d
+```
+
+It listens on port 8322 and keeps files in `data/mcp`. See section 12.7 of the
+[user manual](manual/stlToSolid-User-Manual.md#127-running-it-on-a-nas-or-server).
