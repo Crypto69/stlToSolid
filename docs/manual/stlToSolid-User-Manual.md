@@ -19,7 +19,7 @@ Version 0.6.1 · November 2026</p>
 | 4 | [Sliced Loft](#4-sliced-loft) | Slices a smooth, organic shape (a cap, handle or shell) along one axis and lofts the outlines into one smooth solid. |
 | 5 | [X-Ray](#5-x-ray) | Turns slices of the mesh into real Fusion 360 sketches (lines, arcs and splines, not thousands of points) that you can select and extrude. Downloads a whole stack as one script, and can extrude them into solid slabs. |
 | 6 | [Blueprint](#6-blueprint) | Reads a dimensioned drawing (a picture) into named parameters and sketch-and-extrude features, checks its own build against the drawing, and builds a parametric Fusion 360 script and a STEP. Parts the recipe cannot draw are written as a CadQuery script (STEP only). |
-| 7 | [Fusion 360 add-in: Mesh to Outline](#7-fusion-360-add-in-mesh-to-outline) | The X-Ray and single-slice tracing inside Fusion itself: pick a mesh body and planes, get sketches (and optionally a solid) straight in your design. Also covers the STL to Solid add-in preview. |
+| 7 | [Fusion 360 add-in: Mesh to Outline](#7-fusion-360-add-in-mesh-to-outline) | The X-Ray and single-slice tracing inside Fusion itself: pick a mesh body and planes, get sketches (and optionally a solid) straight in your design. Also describes the STL to Solid add-in, not released yet. |
 | 8 | [Reading the report](#8-reading-the-report) | What the result badge, the quality checks and the output table mean. |
 | 9 | [Using the results in Fusion 360](#9-using-the-results-in-fusion-360) | How to import the STEP and run the downloaded scripts. |
 | 10 | [Troubleshooting](#10-troubleshooting) | Common problems and how to fix them. |
@@ -41,7 +41,7 @@ flat faces, real cylinders and cones, real holes. You get a STEP file you
 can import into Fusion 360 (or any CAD program) and design around.
 
 stlToSolid comes as a desktop app for Mac and Windows, as a Docker container
-for a home server or NAS (opened in a browser), and as add-ins that run
+for a home server or NAS (opened in a browser), and as an add-in that runs
 inside Fusion 360. The desktop app and the browser version are the same
 program with the same four tools. This manual covers all of them.
 
@@ -550,19 +550,23 @@ needed.
 
 ### 7.1 Installing
 
-> The add-ins are not in a public release yet. The website's add-ins
-> button says *coming soon* until they are.
-
-1. Download the add-ins zip from the latest release and unzip it.
-2. Copy the `MeshSectionSketch` folder into Fusion's add-ins folder:
+1. Download the zip for your computer from the
+   [latest release](https://github.com/Crypto69/mesh-to-outline/releases/latest)
+   and unzip it.
+2. Copy the `MeshSectionSketch` folder into Fusion's add-ins folder. Do not
+   rename it.
    - **Mac:** `~/Library/Application Support/Autodesk/Autodesk Fusion 360/API/AddIns/`
+     (the `Library` folder is hidden: in Finder press **Cmd+Shift+G** and paste
+     the path)
    - **Windows:** `%APPDATA%\Autodesk\Autodesk Fusion 360\API\AddIns\`
 3. In Fusion: **Utilities → Add-Ins → Scripts and Add-Ins → Add-Ins** tab,
    select **MeshSectionSketch** and click **Run**. It starts with Fusion
    from then on.
 
-It needs a current Fusion (with its built-in Python 3.14). numpy comes
-inside the add-in.
+It needs a current Fusion (with its built-in Python 3.14) on macOS 15 or
+newer, or Windows 11. numpy comes inside the add-in. To update, stop the
+add-in, replace the folder with the new one and run it again: there is no
+auto-update.
 
 ![The Mesh to Outline button on the Mesh tab](img/fusion-button.jpg)
 *The button sits on the **Mesh** tab, in the **Modify** panel, next to Convert Mesh.*
@@ -652,9 +656,11 @@ root coordinates, so the curves land on the mesh either way.
 | *WARNING: N slabs could not be extruded* | The sketch was drawn, but Fusion found no profile to extrude there. The per-slice list says why. |
 | *numpy could not be imported* / *Fusion's Python is now X.Y* | Fusion updated its Python. Install the matching add-in version. |
 
-### 7.6 STL to Solid add-in (preview)
+### 7.6 STL to Solid add-in (not released yet)
 
-A second add-in, **STL to Solid**, sits next to Mesh to Outline. It does
+> This add-in is not available to download yet. Only Mesh to Outline is.
+
+A second add-in, **STL to Solid**, will sit next to Mesh to Outline. It does
 the face-group conversion (section 3.1, route 2) inside Fusion: it fits
 planes, cylinders, cones, spheres and tori to a mesh body, builds each one
 slightly oversized as a surface, and lets Fusion's Boundary Fill keep the
