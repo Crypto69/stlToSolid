@@ -59,8 +59,9 @@ and cylinders, and holes that are real holes.
 
 Results open in Fusion 360 (or any CAD program that reads STEP).
 
-There is also a **Fusion 360 add-in, Mesh to Outline** (coming soon), that
-does the X-Ray tracing inside Fusion itself. The
+There is also a **Fusion 360 add-in,
+[Mesh to Outline](https://github.com/Crypto69/mesh-to-outline)**, that does the
+X-Ray tracing inside Fusion itself. The
 [user manual](https://github.com/Crypto69/stlToSolid/blob/main/docs/manual/stlToSolid-User-Manual.md) has a step-by-step guide
 for every tool, the add-in included.
 
