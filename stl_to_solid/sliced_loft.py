@@ -599,6 +599,17 @@ def _volume(shape):
     return accurate_volume(shape)
 
 
+# cq's fast Volume() is 1-2 % off on B-spline faces; the guard is for gross
+# failures (a hole cut that ate the run), so it allows that much.
+CUT_SLACK_PCT = 3.0
+
+
+def _cut_sane(body, tool, result):
+    """The cut's volume is one a correct cut can have (boolguard.check)."""
+    from .boolguard import check, volume
+    return check('cut', volume(body), volume(tool), volume(result), CUT_SLACK_PCT) is None
+
+
 def _polyline_gap(P, Q, chunk=256):
     """Largest distance from a point of closed polyline P to closed
     polyline Q (point-to-segment, vectorised in chunks)."""
@@ -849,7 +860,9 @@ def _extrude(outer3d, holes3d, d):
     body = _thru(_ring_wires([outer3d, outer3d + d])[0], True)
     for h in holes3d:
         tool = _thru(_ring_wires([h - d * 0.01, h + d * 1.01])[0], True)
-        body = body.cut(tool)
+        c = body.cut(tool)
+        if _cut_sane(body, tool, c):
+            body = c
     return body
 
 
@@ -1090,7 +1103,7 @@ def loft_body(mesh, axis, interval=0.2, ruled=False, verbose=True, z_range=None,
                         try:
                             tool = _extrude_polygon(hp, cutter, zs[0] - EPS, zs[-1] + EPS)
                             c = body.cut(tool)
-                            if not c.wrapped.IsNull() and _valid(c):
+                            if not c.wrapped.IsNull() and _valid(c) and _cut_sane(body, tool, c):
                                 body = c
                                 n_holes += 1
                         except Exception:
@@ -1154,7 +1167,8 @@ def loft_body(mesh, axis, interval=0.2, ruled=False, verbose=True, z_range=None,
                                                       (tm, [abs(signed_area(Q)) for Q in mh], mhz, mf),
                                                       ax_vec, bridge_pairs)
                         c = body.cut(tool)
-                        if not c.wrapped.IsNull() and _valid(c) and len(c.Solids()) >= 1:
+                        if (not c.wrapped.IsNull() and _valid(c) and len(c.Solids()) >= 1
+                                and _cut_sane(body, tool, c)):
                             cut = c
                             break
                     if cut is None:

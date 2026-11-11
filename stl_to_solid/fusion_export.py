@@ -146,6 +146,35 @@ def emit_fusion_script(bodies_info, design_name='stlToSolid'):
         '    return out',
         '',
         '',
+        'def _fillet(root, pts_cm, r_cm):',
+        '    """Constant-radius fillet on the edges of the newest body that run',
+        '    through the given points (cm); the edges are found by distance, so the',
+        '    script does not depend on Fusion\'s edge order. Returns the feature."""',
+        '    body = root.bRepBodies.item(root.bRepBodies.count - 1)',
+        '    mm = adsk.core.Application.get().measureManager',
+        '    edges = adsk.core.ObjectCollection.create()',
+        '    for p in pts_cm:',
+        '        pt = adsk.core.Point3D.create(*p)',
+        '        best, bd = None, None',
+        '        for i in range(body.edges.count):',
+        '            e = body.edges.item(i)',
+        '            d = mm.measureMinimumDistance(e, pt).value',
+        '            if bd is None or d < bd:',
+        '                best, bd = e, d',
+        '        if best is not None and bd < 0.01:',
+        '            edges.add(best)',
+        '    if edges.count == 0:',
+        "        raise RuntimeError('fillet R%.3f mm: no edge found at %s' % (r_cm * 10, pts_cm[0]))",
+        '    feats = root.features.filletFeatures',
+        '    fi = feats.createInput()',
+        '    val = adsk.core.ValueInput.createByReal(r_cm)',
+        '    try:',
+        '        fi.edgeSetInputs.addConstantRadiusEdgeSet(edges, val, True)',
+        '    except AttributeError:',
+        '        fi.addConstantRadiusEdgeSet(edges, val, True)',
+        '    return feats.add(fi)',
+        '',
+        '',
         'def run(context):',
         '    ui = None',
         '    try:',
@@ -233,6 +262,11 @@ def emit_fusion_script(bodies_info, design_name='stlToSolid'):
             L.append(f"{ind}# cross-axis cone (countersink), half-angle {np.degrees(c['half_angle']):.1f} deg: "
                      f"add a Revolve cut or Hole feature manually; apex {np.round(c['apex'], 3).tolist()} mm, "
                      f"axis {np.round(c['axis'], 4).tolist()}, extent {c['h0']:.2f}..{c['h1']:.2f} mm from the apex")
+        for fi in info.get('fillets', []):
+            pts = [tuple(_cm(c) for c in p) for p in fi['edges']]
+            meas = ', '.join(f'{m:.4f}' for m in fi.get('r_measured', []))
+            L.append(f"{ind}# fillet R{fi['r']:g} mm on {len(pts)} edge(s) (measured {meas})")
+            L.append(f"{ind}_fillet(root, {pts}, {_cm(fi['r'])})")
         L.append(f"{ind}made_any = True")
     L += [
         f"{ind}if not made_any:",

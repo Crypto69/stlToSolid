@@ -450,6 +450,11 @@ features and local patching so that one axis need not explain everything.
    cavity goes in as an inner shell of the solid, not a boolean). Scan-like
    input (dense, low dihedral, no exactly-coplanar facets) is rebuilt via the
    pymeshlab repair ladder and decimated with topology preservation.
+   On scan input its **surface noise** is measured (`mesh_noise`: a quadric
+   fitted to each sampled vertex's 2-ring, median scatter; a jittered bracket
+   with σ 0.01 / 0.03 reads 0.0097 / 0.029). Nothing about a scan is known
+   finer than about 3σ, so the fit tolerance and the gates never go below
+   that (`[noise]` in the log). A CAD export is taken as exact.
 2. **Axis discovery** (`extrusion`) — face normals are clustered on the
    Gaussian sphere; each candidate axis is offered raw *and* snapped to
    global XYZ (when within 5°) and *scored* by the volume fraction of the
@@ -470,17 +475,40 @@ features and local patching so that one axis need not explain everything.
    neighbours, arc radii/centres re-fitted on the mesh vertices (which lie
    exactly on the CAD surface — section vertices sit on chords), and
    junction solving: line/line at their intersection, tangent line/arc
-   fillets solved exactly, lines squared to the dominant frame.
+   fillets solved exactly, lines squared to the dominant frame. Where a
+   line and an arc both fit, the arc must also beat the line by more than
+   the noise explains (an F-test: n·(σ²_line − σ²_arc) > 16·noise²), so a
+   scanned flat wall's wobble stays a line; on a CAD export (noise 0) the
+   test always passes.
 5. **Constraint snapping** (GlobFit-lite, `rebuild._global_snap`) — radii and
    centres are clustered *globally across all slabs* and snapped to cluster
    means. This turns facet-noise families like r = 5.242..5.257 into a
-   single design radius.
+   single design radius. Each radius, hole diameter, cross bore and slab
+   height then snaps to a **nominal** (`nominal`: the roundest of the 1 /
+   0.5 / 0.1 / 0.05 / 0.01 mm grids) only when the nominal lies within the
+   measurement's tolerance — 3σ on a scan, 0.001 mm on a CAD export, half
+   the spread when slabs disagree — never across it; the measured value is
+   kept beside it (`r_measured`). An exported R4.2501 becomes R4.25, a
+   14.4202 mm extrude 14.42 (`[snap]` in the log).
+   **Mirror symmetry** (`symmetry`): planes through the extrusion axis are
+   read off the mesh — the surface is sampled, reflected, slid back onto
+   the mesh (ICP on the samples that face along the mirror normal) — and
+   the fitted lines, arcs and circles are paired with their mirror twins
+   and averaged, so the sketch is exactly symmetric. Only pieces whose
+   twins agree within a few times the plane's RMS (at least 0.01 mm) pair,
+   so a nearly symmetric part keeps its asymmetry (`[sym]` in the log,
+   `symmetry` in the metrics).
 6. **Rebuild** (`rebuild`) — constant slabs are extruded; slabs whose section
    varies linearly (drafts, chamfers, countersinks, tapered ribs) are
    **lofted with analytic faces** — planes between matched lines, cones /
    cylinders between matched arcs and circles. Equal consecutive slabs are
    merged, Booleans use a fuzzy tolerance, and a finishing pass drops
-   micro-edges, unifies same-domain faces and checks validity.
+   micro-edges, unifies same-domain faces and checks validity. Every
+   Boolean is **volume-checked** (`boolguard`): a cut never gains volume or
+   removes more than its tool holds, a fuse never loses volume or makes
+   any; a result that breaks one is retried with other fuzzy values, then
+   refused — a bore or cavity cut is skipped (`[guard]` in the log), a slab
+   fuse fails the prismatic rung — instead of shipping a wrong solid.
 7. **Cross-axis features** (`features`) — curved facet regions are split
    into coaxial primitives and classified: **cylinders** (bores not parallel
    to the main axis, radius/axis refined by least squares on the vertices,
@@ -510,12 +538,38 @@ features and local patching so that one axis need not explain everything.
      through boundary vertices. Regions no primitive fits, or whose face
      will not build, keep their exact facets. Sew → largest solid → heal →
      check → gate. Mode `facegroup`; no sketch/extrude script for it.
+     **Curved walls** (`curved_strips`): a chain of three or more plane
+     regions meeting at 0.3–15°, all square to one direction, is a curved
+     wall the exporter cut into flat strips; it becomes one face, a curve
+     interpolated through the strips' boundary lines and swept along that
+     direction (`SURFACE_OF_LINEAR_EXTRUSION`), when every vertex lies on it.
+     A merged face that will not build goes back to its strips. The
+     Boundary Fill export keeps the strips (its tools are analytic).
+     **Rounds as fillets** (`fillets`): when the face-group solid is a
+     prismatic part with constant-radius edge rounds (cylinder or torus
+     faces tangent to a plane or cylinder on both rails), the rounds are
+     removed (OCC defeaturing), the sharp part goes through the prismatic
+     rung, and the rounds go back on as fillets at nominal radii. The result
+     is held to the same gate; it passes as mode `prismatic` with
+     `build.fillets`, and the Fusion and CadQuery scripts add one Fillet
+     feature per radius (edges found by position). A cheap test first
+     (every non-round face a plane, cylinder or extruded curve along or
+     square to one axis) keeps the slow defeaturing off parts that cannot
+     be extrusions.
    * **Hybrid patch** (`hybrid`): the prismatic solid with its deviating
      regions boxed and replaced by the exact faceted geometry,
      `(P − B) ∪ (F ∩ B)`, re-checked. Keeps the script.
    * **Faceted** route: coplanar triangles merged into single planar faces
      *before* sewing, curved regions decimated within `--reduce-tol`, sewn
      into a manifold solid.
+   Every accepted, non-faceted body also gets its volume **places**
+   (`places`): the mesh and the solid are filled on one voxel grid (about
+   120 000 cells; a leaky mesh by the generalised winding number), cells
+   next to the mesh surface are left out, and the cells where they disagree
+   are grouped into ranked regions of missing or excess material, each with
+   mm³, depth and box (`[places]` in the log, `places` in the metrics). A
+   plate rebuilt without two of its holes reads two 62 mm³ excess places at
+   the holes; a correct rebuild reads none.
 9. **Export** — one STEP (AP214) with **named bodies and faces coloured by
    surface type**, plus a **CadQuery script** (`<out>.py`) that rebuilds the
    recognised sketches, extrudes, lofts and feature cuts with named

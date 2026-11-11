@@ -10,6 +10,8 @@ Cylinder recovery per curved region:
 """
 import numpy as np
 import trimesh
+
+from .boolguard import BooleanGuardError, guarded_cut
 from .profile_fit import fit_circle_taubin
 
 
@@ -323,7 +325,13 @@ def subtract_cones(solid, cones, mesh=None, extend=1.0, verbose=True):
             continue
         pnt = cq.Vector(*(apex + axis * a0))
         cone = cq.Solid.makeCone(r0, r1, a1 - a0, pnt, cq.Vector(*axis))
-        solid = solid.cut(cq.Workplane('XY').newObject([cone]), tol=1e-4)
+        try:
+            solid = guarded_cut(solid, cq.Workplane('XY').newObject([cone]), tol=1e-4)
+        except BooleanGuardError as e:
+            c['skipped'] = str(e)
+            if verbose:
+                print(f"[guard] cone cut skipped: {e}")
+            continue
         if verbose:
             print(f"[feature] cut cone half-angle {np.degrees(al):.1f}deg axis "
                   f"{np.round(axis,2)} r {r0:.2f}->{r1:.2f} depth {h1 - h0:.2f} "
@@ -544,7 +552,13 @@ def subtract_cylinders(solid, cyls, extend=1.0, mesh=None, verbose=True):
         h = (c['h1'] - c['h0']) + ext0 + ext1
         cut = (cq.Workplane(cq.Plane(origin=tuple(p0), normal=tuple(axis)))
                .circle(c['r']).extrude(h))
-        solid = solid.cut(cut, tol=1e-4)
+        try:
+            solid = guarded_cut(solid, cut, tol=1e-4)
+        except BooleanGuardError as e:
+            c['skipped'] = str(e)
+            if verbose:
+                print(f"[guard] cylinder cut r={c['r']:.3f} skipped: {e}")
+            continue
         c['blind'] = [ext0 == 0.0, ext1 == 0.0]
         if verbose:
             kind = ('through' if ext0 and ext1 else

@@ -4,9 +4,12 @@ import trimesh
 import cadquery as cq
 from .profile_fit import (_arc_mid, segment_polyline, try_full_circle, snap_profile,
                           solve_junctions, refine_arcs_with_points)
+from .nominal import nominal, snap_tolerance, snap_radius, snap_diameter_radius
+from .boolguard import guarded_cut, guarded_fuse
 
 
-def build_solid(slabs, axis, tol=0.08, verbose=True, mesh=None):
+def build_solid(slabs, axis, tol=0.08, verbose=True, mesh=None, noise=0.0, snap_tol=None,
+                symmetry=True):
     """Union of one extrusion per slab. Profiles fitted as lines/arcs,
     refined against the mesh vertices (which lie exactly on the CAD
     surface), then globally constraint-snapped (radii/centers unified
@@ -14,8 +17,25 @@ def build_solid(slabs, axis, tol=0.08, verbose=True, mesh=None):
 
     Consecutive slabs with identical profiles are merged into one extrusion
     (fewer Booleans, no seam faces); slabs are fused with glue since they
-    only touch."""
+    only touch.
+
+    `noise` (mm, 0 for a CAD export) makes arcs prove themselves against
+    lines (profile_fit's F-test). Radii, hole diameters and slab heights
+    snap to round nominals within `snap_tol` (default from the noise, see
+    nominal.snap_tolerance); every Boolean is volume-checked
+    (boolguard). With `symmetry`, mirror planes through the axis are read
+    off the mesh and the profiles made exactly symmetric about them
+    (symmetry.py); the planes found are in the report's first entry."""
     basis = _axis_basis(axis)
+    if snap_tol is None:
+        snap_tol = snap_tolerance(noise, tol)
+    # heights snap for the build only: the fit reads the mesh at the
+    # measured heights (a slab's vertex band ends there)
+    level_to = _level_map(slabs, snap_tol)
+    level_snaps = sum(1 for z, v in level_to.items() if v != z)
+    if verbose and level_snaps:
+        print(f"[snap] {level_snaps} slab height(s) snapped to nominals "
+              f"(within {snap_tol:.3g} mm)")
     # pass 1: fit every ring. A slab whose section varies (taper, draft,
     # chamfer, countersink) is fitted at BOTH ends and lofted; a constant
     # slab is fitted at its mid section and extruded.
@@ -30,21 +50,26 @@ def build_solid(slabs, axis, tol=0.08, verbose=True, mesh=None):
         pts_all = np.column_stack([Vm @ basis[:3, 0], Vm @ basis[:3, 1]])
     for slab in slabs:
         pts2d = _slab_vertices_2d(mesh, axis, basis, slab) if mesh is not None else None
-        rings = _fit_polys(slab['polygons'], tol, pts2d, pts_all)
+        rings = _fit_polys(slab['polygons'], tol, pts2d, pts_all, noise)
         fitted.append(rings)
         loft = None
         from .extrusion import _loftable
         if not slab.get('constant', True) and slab.get('ends') and _loftable(slab):
             (za, pa), (zb, pb) = slab['ends']
             if pa and pb and len(pa) == len(pb):
-                ra = _fit_polys(pa, tol, pts2d)
-                rb_ = _fit_polys(pb, tol, pts2d)
+                ra = _fit_polys(pa, tol, pts2d, noise=noise)
+                rb_ = _fit_polys(pb, tol, pts2d, noise=noise)
                 if _compatible(ra, rb_):
                     loft = (ra, rb_, za, zb)
         lofts.append(loft)
     # global radius/centre clustering over the constant (extruded) slabs
     # only: a taper's end radii must not be averaged into them
-    _global_snap(fitted)
+    n_snap = _global_snap(fitted, snap_tol=snap_tol)
+    if verbose and n_snap:
+        print(f"[snap] {n_snap} radius/diameter value(s) snapped to nominals "
+              f"(vertex-fitted arcs, within {snap_tol:.3g} mm or half their spread across slabs)")
+    sym = _symmetrise(fitted + [r for lf in lofts if lf for r in lf[:2]], mesh, axis,
+                      basis, tol, noise, verbose) if symmetry and mesh is not None else []
     for rings in fitted + [r for lf in lofts if lf for r in lf[:2]]:
         for outer, holes in rings:
             for ring in [outer] + holes:
@@ -60,6 +85,7 @@ def build_solid(slabs, axis, tol=0.08, verbose=True, mesh=None):
     solid = None
     report = []
     for si, (z0, z1, rings, loft) in enumerate(merged):
+        z0, z1 = level_to.get(float(z0), z0), level_to.get(float(z1), z1)
         h = z1 - z0
         wp = cq.Workplane(cq.Plane(
             origin=tuple(np.asarray(axis) * z0),
@@ -93,23 +119,60 @@ def build_solid(slabs, axis, tol=0.08, verbose=True, mesh=None):
         if slab_solid is None:
             for outer, holes in rings:
                 s = _extrude_profile(wp, outer, holes, h)
-                slab_solid = s if slab_solid is None else slab_solid.union(s, tol=FUZZY)
+                slab_solid = s if slab_solid is None else guarded_fuse(slab_solid, s, tol=FUZZY)
         report.append({'slab': si, 'z0': z0, 'z1': z1, 'profiles': len(rings),
                        'rings': rings, 'kind': kind,
                        'loft': loft})
         if verbose:
             print(f"[build] slab {si}: z {z0:.2f}..{z1:.2f} "
                   f"({len(rings)} profile(s), {kind})")
-        solid = slab_solid if solid is None else solid.union(slab_solid, tol=FUZZY)
+        solid = slab_solid if solid is None else guarded_fuse(solid, slab_solid, tol=FUZZY)
     solid = finish_solid(solid, verbose=verbose)
+    if report and sym:
+        report[0]['symmetry'] = sym
     return solid, report
 
 
-def _fit_polys(polys, tol, pts2d, pts_all=None):
+def _symmetrise(all_rings, mesh, axis, basis, tol, noise, verbose):
+    """Read mirror planes through the axis and make every slab's fitted
+    profiles symmetric about them. Pieces pair only within a tight
+    tolerance (a few times the plane's RMS, at least 0.01 mm, never past
+    the fit tolerance), so a nearly symmetric part keeps its asymmetry.
+    Returns the planes used, for the report."""
+    from .symmetry import (axis_mirror_plane, line_2d, symmetrise_profiles, ACCEPT_RMS,
+                           snap_line_to_frame, refine_offset)
+    from .profile_fit import dominant_frame
+    try:
+        planes = axis_mirror_plane(mesh, axis, basis,
+                                   accept_rms=max(ACCEPT_RMS, 3.0 * float(noise or 0.0)))
+    except Exception as e:
+        if verbose:
+            print(f"[sym] mirror search failed ({type(e).__name__}: {e})")
+        return []
+    out = []
+    lines = [p for rings in all_rings for o, hs in rings for r in [o] + list(hs)
+             if isinstance(r, list) for p in r if p['type'] == 'line']
+    frame = dominant_frame(lines) if lines else None
+    for pl in planes:
+        m, e = line_2d(pl, basis)
+        m = snap_line_to_frame(m, frame)
+        pair_tol = min(tol, max(5.0 * pl['rms'], 0.01))
+        e = refine_offset(all_rings, m, e, pair_tol)
+        moved = sum(symmetrise_profiles(rings, m, e, pair_tol) for rings in all_rings)
+        out.append({'normal': [float(x) for x in pl['normal']], 'd': float(pl['d']),
+                    'rms': float(pl['rms']), 'pieces': int(moved)})
+        if verbose:
+            print(f"[sym] mirror plane normal {np.round(pl['normal'], 3)} "
+                  f"(rms {pl['rms']:.4f} mm): {moved} profile piece(s) made symmetric")
+    return out
+
+
+def _fit_polys(polys, tol, pts2d, pts_all=None, noise=0.0):
     rings = []
     for poly in polys:
-        outer = _fit_ring(np.array(poly.exterior.coords), tol, pts2d, pts_all)
-        holes = [_fit_ring(np.array(r.coords), tol, pts2d, pts_all) for r in poly.interiors]
+        outer = _fit_ring(np.array(poly.exterior.coords), tol, pts2d, pts_all, noise)
+        holes = [_fit_ring(np.array(r.coords), tol, pts2d, pts_all, noise)
+                 for r in poly.interiors]
         rings.append((outer, holes))
     return rings
 
@@ -170,8 +233,8 @@ def _loft_slab(wp, rings_a, rings_b, h):
         for x, y in zip(ha, hb):
             y = _align_ring(x, y)
             hole = _loft_ring(wp, x, y, h, grow=0.02)
-            body = body.cut(hole, tol=FUZZY)
-        solid = body if solid is None else solid.union(body, tol=FUZZY)
+            body = guarded_cut(body, hole, tol=FUZZY)
+        solid = body if solid is None else guarded_fuse(solid, body, tol=FUZZY)
     return solid
 
 
@@ -563,13 +626,29 @@ def _iter_arcs(fitted):
                             yield p
 
 
-def _global_snap(fitted, radius_tol=0.12, center_tol=0.35):
+# A radius fitted to section chords (not refined on mesh vertices) is
+# short by up to the facet sagitta, so it is only known to about this; it
+# snaps to the 0.1 mm grid within it, as before nominal snapping.
+CHORD_SNAP_TOL = 0.02
+
+
+def _global_snap(fitted, radius_tol=0.12, center_tol=0.35, snap_tol=None):
     """Cluster radii and centers across ALL slabs and snap to cluster means.
     This turns facet-noise families like 5.242..5.257 into one radius.
-    Junctions are re-solved afterwards by the caller."""
+    Junctions are re-solved afterwards by the caller.
+
+    Each cluster's radius then snaps to a nominal: a cluster with
+    vertex-fitted (refined) members is known to the mesh's accuracy, or to
+    half the members' spread when they disagree, and snaps within that
+    (at least `snap_tol`) on the nominal grids — by diameter when every
+    member is a full circle (a hole), by radius otherwise; a chord-fitted
+    cluster keeps the old rule (0.1 grid within CHORD_SNAP_TOL). The
+    measured value is kept as 'r_measured'. Returns how many clusters
+    moved under the nominal rule."""
     arcs = list(_iter_arcs(fitted))
     if not arcs:
-        return
+        return 0
+    n_snapped = 0
     # Radii clustering (1D, sort + gap split). The spread of a cluster is
     # capped as well as the gap between neighbours: comparing only against the
     # previous member lets radii chain (5.0, 5.1, ... 5.4 all within 0.12 of
@@ -591,11 +670,22 @@ def _global_snap(fitted, radius_tol=0.12, center_tol=0.35):
         # refined (vertex-fitted) radii are trusted more than chord fits
         ref = [a['r'] for a in cl if a.get('refined')]
         r = float(np.mean(ref if ref else [a['r'] for a in cl]))
-        rr = round(r, 1)
-        if abs(rr - r) < 0.02:      # snap to 0.1mm grid only when very close
-            r = rr
+        measured = r
+        if ref and snap_tol is not None:
+            # the members disagree by their spread (a wall a hair off
+            # square reads a different radius in every slab): the mean is
+            # known to half of it, so it may snap that far
+            tol_c = min(max(snap_tol, 0.5 * (max(ref) - min(ref))), 0.5 * radius_tol)
+            full = all(a.get('full') for a in cl)
+            r = snap_diameter_radius(r, tol_c) if full else snap_radius(r, tol_c)
+            n_snapped += r != measured
+        else:
+            rr = round(r, 1)
+            if abs(rr - r) < CHORD_SNAP_TOL:
+                r = rr
         for a in cl:
             a['r'] = r
+            a['r_measured'] = measured
     # center clustering (2D greedy)
     done = [False] * len(arcs)
     for i, a in enumerate(arcs):
@@ -612,6 +702,23 @@ def _global_snap(fitted, radius_tol=0.12, center_tol=0.35):
         for g in grp:
             g['center'] = c
     _snap_lines_across_slabs(fitted)
+    return n_snapped
+
+
+def _level_map(slabs, snap_tol):
+    """{measured height: snapped height} for every slab end: heights
+    measured from the lowest level, snapped to nominals within `snap_tol`
+    (a 2.9996 mm plate is 3). One height maps to one value, so touching
+    slabs still touch; when two heights would land on one value (a slab
+    would vanish) nothing moves."""
+    if not slabs or snap_tol is None:
+        return {}
+    zs = sorted({float(z) for s in slabs for z in (s['z0'], s['z1'])})
+    base = zs[0]
+    to = {z: base + nominal(z - base, snap_tol)[0] for z in zs}
+    if len(set(to.values())) != len(zs):
+        return {z: z for z in zs}
+    return to
 
 
 def _iter_lines(fitted):
@@ -759,7 +866,7 @@ def _align_arcs_across_slabs(fitted, center_tol=0.35):
     return dirty
 
 
-def _fit_ring(coords, tol, pts2d=None, pts_all=None):
+def _fit_ring(coords, tol, pts2d=None, pts_all=None, noise=0.0):
     """Ring of 2D coords -> full circle dict or list of line/arc prims.
     Arcs are refined on the slab's own mesh vertices, then — those that
     could not be — on all mesh vertices near their circle."""
@@ -772,7 +879,7 @@ def _fit_ring(coords, tol, pts2d=None, pts_all=None):
         if not circ.get('refined') and pts_all is not None:
             refine_arcs_with_points([circ], pts_all, tol)
         return circ
-    prims = segment_polyline(pts, tol=tol, closed=True)
+    prims = segment_polyline(pts, tol=tol, closed=True, noise=noise)
     refine_arcs_with_points(prims, pts2d, tol)
     if pts_all is not None:
         rest = [p for p in prims if p['type'] == 'arc' and not p.get('refined')]

@@ -505,7 +505,9 @@ def test_pipeline_flag_disables_the_engine(tmp_path):
     r = run(p, str(tmp_path / 'ft.step'), verbose=False, face_groups=False)
     assert r['mode'] == 'faceted'
     r2 = run(p, str(tmp_path / 'ft2.step'), verbose=False)
-    assert r2['mode'] == 'facegroup' and r2['metrics']['faces_out'] == 10
+    # with the engine on, the face-group solid's rounds become a fillet
+    # feature on an extrude (fillets.py): same 10 faces
+    assert r2['mode'] == 'prismatic' and synth.step_faces(str(tmp_path / 'ft2.step'))[0] == 10
 
 
 def test_cli_accepts_no_face_groups(tmp_path):

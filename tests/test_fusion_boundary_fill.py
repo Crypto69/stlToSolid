@@ -137,8 +137,9 @@ def test_script_refuses_huge_and_skips_other_modes(tmp_path):
 
 def test_pipeline_writes_bfill_script_for_facegroup_only(tmp_path):
     from stl_to_solid import run
-    # fillet_top is not an extrusion along any axis: face-group route
-    p = synth.export(synth.fillet_top(), tmp_path / 'ft.stl')
+    # sphere_boss is not an extrusion along any axis: face-group route
+    # (fillet_top was, until its rounds became a fillet feature on an extrude)
+    p = synth.export(synth.sphere_boss(), tmp_path / 'ft.stl')
     r = run(str(p), str(tmp_path / 'ft.step'), verbose=False)
     assert r['mode'] == 'facegroup'
     assert 'build' not in r['metrics']
@@ -282,7 +283,7 @@ def test_pipeline_outlook_is_the_dry_run_and_the_header_agrees(tmp_path, monkeyp
     without scripts carries no outlook at all (nothing stale from the
     run before)."""
     from stl_to_solid import run, bfill_check
-    p = synth.export(synth.fillet_top(), tmp_path / 'ft.stl')
+    p = synth.export(synth.sphere_boss(), tmp_path / 'ft.stl')
     r = run(str(p), str(tmp_path / 'ft.step'), verbose=False)
     c = r['bfill_check']
     assert c['ok'] is True and 'enclose' in c['reason']

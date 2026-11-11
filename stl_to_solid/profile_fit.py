@@ -179,11 +179,15 @@ def _dedupe(pts, eps=1e-9):
 CORNER_RAD = np.radians(30.0)     # a turn this sharp is a real corner
 
 
-def segment_polyline(pts, tol=0.08, closed=True, min_arc_pts=4):
+def segment_polyline(pts, tol=0.08, closed=True, min_arc_pts=4, noise=0.0):
     """Split a (closed) polyline into line/arc primitives within tol.
 
     Returns a list of primitives in order; for a closed ring the chain is
     cyclic (last primitive ends where the first starts).
+
+    `noise` is the mesh's surface noise in mm (0 for an exact CAD export):
+    an arc then has to beat a line by more than that noise explains
+    (`_arc_significant`).
     """
     pts = _dedupe(np.asarray(pts, float))
     n = len(pts)
@@ -197,15 +201,17 @@ def segment_polyline(pts, tol=0.08, closed=True, min_arc_pts=4):
         if ta[k] > CORNER_RAD:
             pts = np.roll(pts, -k, axis=0)
         pts = np.vstack([pts, pts[:1]])
-    prims = _segment_span(pts, tol, min_arc_pts, closed=closed)
+    prims = _segment_span(pts, tol, min_arc_pts, closed=closed, noise=noise)
     # merge and boundary refinement feed each other: handing a stray
     # vertex back to its line can bring two halves of a fillet within tol
     # of one circle, so alternate until nothing changes
     for _ in range(3):
-        prims = merge_pass(prims, pts_of(prims), tol, min_arc_pts, closed=closed)
+        prims = merge_pass(prims, pts_of(prims), tol, min_arc_pts, closed=closed,
+                           noise=noise)
         n = len(prims)
         prims = refine_boundaries(prims, tol, min_arc_pts, closed=closed)
-        merged = merge_pass(prims, pts_of(prims), tol, min_arc_pts, closed=closed)
+        merged = merge_pass(prims, pts_of(prims), tol, min_arc_pts, closed=closed,
+                            noise=noise)
         if len(merged) == n:
             prims = merged
             break
@@ -413,12 +419,44 @@ def _line_hides_bend(pts, line_dev, tol):
     return False
 
 
-def _try_fit(pts, tol, min_arc_pts):
+# Line or arc, when both fit: an arc has one more parameter than a line, so
+# it always fits a little better, noise or not. It must lower the summed
+# squared residual by more than the noise can (an F-test, chi-square with
+# one degree of freedom: 16 sigma^2 is p ~ 6e-5). On a scanned flat wall the
+# arc's gain is noise and the wall stays a line; on a CAD export (noise 0)
+# the test always passes and the tolerance rules above decide alone.
+F_TEST_K = 16.0
+
+
+def _rms_line(pts, line):
+    d = np.asarray(line['dir'], float)
+    nrm = np.array([-d[1], d[0]])
+    e = (pts - np.asarray(line['point'], float)) @ nrm
+    return float(np.sqrt(np.mean(e * e)))
+
+
+def _rms_circle(pts, circ):
+    c = np.asarray(circ['center'], float)
+    e = np.hypot(pts[:, 0] - c[0], pts[:, 1] - c[1]) - float(circ['r'])
+    return float(np.sqrt(np.mean(e * e)))
+
+
+def _arc_significant(pts, line, circ, noise):
+    """True when the arc `circ` explains `pts` better than the line `line`
+    by more than surface noise `noise` (mm) explains (see F_TEST_K)."""
+    if not noise or noise <= 0:
+        return True
+    gain = len(pts) * (_rms_line(pts, line) ** 2 - _rms_circle(pts, circ) ** 2)
+    return gain > F_TEST_K * noise * noise
+
+
+def _try_fit(pts, tol, min_arc_pts, noise=0.0):
     """Best single primitive for a span, or None. Lines are preferred:
     an arc is only accepted when no line fits, its radius is sane, and it
     bends by more than the tolerance (otherwise a line would do). Neither
     may absorb an exactly straight run that belongs to a wall (see
-    `_arc_hides_straight_run` / `_line_hides_bend`)."""
+    `_arc_hides_straight_run` / `_line_hides_bend`). Where a line fits as
+    well, the arc must also pass the noise test (`_arc_significant`)."""
     if len(pts) < 2:
         return None
     line = fit_line(pts)
@@ -429,7 +467,8 @@ def _try_fit(pts, tol, min_arc_pts):
         circ = fit_circle_taubin(pts)
         if circ and circ['dev'] <= tol and _arc_sane(pts, circ) \
                 and not _arc_hides_straight_run(pts, circ, tol):
-            if not line_ok or circ['dev'] < line['dev'] / ARC_OVER_LINE:
+            if not line_ok or (circ['dev'] < line['dev'] / ARC_OVER_LINE
+                               and _arc_significant(pts, line, circ, noise)):
                 circ.update(_arc_params(pts, circ))
                 circ['p0'], circ['p1'] = pts[0].copy(), pts[-1].copy()
                 circ['_pts'] = pts
@@ -439,11 +478,11 @@ def _try_fit(pts, tol, min_arc_pts):
     return None
 
 
-def _segment_span(pts, tol, min_arc_pts, closed, depth=0):
+def _segment_span(pts, tol, min_arc_pts, closed, depth=0, noise=0.0):
     n = len(pts)
     if n < 2:
         return []
-    fit = _try_fit(pts, tol, min_arc_pts)
+    fit = _try_fit(pts, tol, min_arc_pts, noise)
     if fit is not None:
         return [fit]
     if depth > 40 or n <= 2:
@@ -462,8 +501,8 @@ def _segment_span(pts, tol, min_arc_pts, closed, depth=0):
             vn = v / L
             perp = np.abs((pts - pts[0]) @ np.array([-vn[1], vn[0]]))
             k = int(np.clip(np.argmax(perp), 1, n - 2))
-    return (_segment_span(pts[:k + 1], tol, min_arc_pts, closed, depth + 1) +
-            _segment_span(pts[k:], tol, min_arc_pts, closed, depth + 1))
+    return (_segment_span(pts[:k + 1], tol, min_arc_pts, closed, depth + 1, noise) +
+            _segment_span(pts[k:], tol, min_arc_pts, closed, depth + 1, noise))
 
 
 def _mk_line(pts):
@@ -505,7 +544,8 @@ def _arc_sane(pts, fit):
     return True
 
 
-def merge_pass(prims, pts_list, tol, min_arc_pts, closed=True, max_rounds=50):
+def merge_pass(prims, pts_list, tol, min_arc_pts, closed=True, max_rounds=50,
+               noise=0.0):
     """Greedily merge adjacent primitives when one primitive fits their
     combined polyline within tol (cyclic for closed rings). Lines are
     preferred over arcs; the merge that lowers the count most first."""
@@ -525,7 +565,7 @@ def merge_pass(prims, pts_list, tol, min_arc_pts, closed=True, max_rounds=50):
             if not np.allclose(a[-1], b[0]):
                 continue
             span = np.vstack([a, b[1:]])
-            fit = _try_fit(span, tol, min_arc_pts)
+            fit = _try_fit(span, tol, min_arc_pts, noise)
             if fit is None:
                 continue
             # score: prefer merges that produce a line, then larger spans
@@ -544,7 +584,7 @@ def merge_pass(prims, pts_list, tol, min_arc_pts, closed=True, max_rounds=50):
                 if not (np.allclose(a[-1], b[0]) and np.allclose(b[-1], c[0])):
                     continue
                 span = np.vstack([a, b[1:], c[1:]])
-                fit = _try_fit(span, tol, min_arc_pts)
+                fit = _try_fit(span, tol, min_arc_pts, noise)
                 if fit is None:
                     continue
                 score = (fit['type'] == 'line', len(span))

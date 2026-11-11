@@ -138,14 +138,28 @@ def _n_torus(p, pr):
     return w / np.maximum(np.linalg.norm(w, axis=1)[:, None], 1e-12)
 
 
+def _d_extrusion(p, pr):
+    from .curved_strips import distance
+    return distance(p, pr)
+
+
+def _n_extrusion(p, pr):
+    from .curved_strips import normals
+    return normals(p, pr)
+
+
 DIST = {'plane': _d_plane, 'cylinder': _d_cyl, 'sphere': _d_sph, 'cone': _d_cone,
-        'torus': _d_torus}
+        'torus': _d_torus, 'extrusion': _d_extrusion}
 NORM = {'plane': _n_plane, 'cylinder': _n_cyl, 'sphere': _n_sph, 'cone': _n_cone,
-        'torus': _n_torus}
+        'torus': _n_torus, 'extrusion': _n_extrusion}
 
 
 def _project(p, kind, pr):
-    """Closest point on the surface for one 3-D point (closed forms)."""
+    """Closest point on the surface for one 3-D point (closed forms; the
+    'extrusion' kind by its sampled profile, see curved_strips)."""
+    if kind == 'extrusion':
+        from .curved_strips import project
+        return project(p, pr)
     if kind == 'plane':
         return p - ((p - pr['point']) @ pr['normal']) * pr['normal']
     if kind == 'sphere':
@@ -1529,6 +1543,9 @@ def _make_surface(kind, pr, pts, bloops=None, sphere_axis=None):
                           Geom_ToroidalSurface)
     if bloops is None:
         bloops = []
+    if kind == 'extrusion':
+        from .curved_strips import make_surface
+        return make_surface(pr)
     if kind == 'plane':
         return gp_Pln(gp_Pnt(*map(float, pr['point'])), gp_Dir(*map(float, pr['normal'])))
     if kind == 'sphere':
@@ -2598,8 +2615,57 @@ def convert(mesh, tol=0.08, verbose=False):
         return None, stats
     stats['snaps'] = regularise(regions, mesh, fit_tol=tol,
                                 merge_tol=stats.get('merge_tol'), verbose=verbose)
-    solid, bstats = build_solid(mesh, regions, fit_tol=tol, verbose=verbose)
-    stats.update(bstats)
+    # rows of flat strips that are one curved wall become one face; a merge
+    # whose face will not build goes back to its strips (never to triangles).
+    # build_solid edits the list it is given (peels pinched regions into
+    # pieces, renumbers), so every build gets fresh copies.
+    import dataclasses
+    from .curved_strips import merge_strips
+
+    def fresh(lst):
+        # copies numbered by position: build_solid looks regions up by id
+        out = [dataclasses.replace(r) for r in lst]
+        for i, r in enumerate(out):
+            r.id = i
+        return out
+    pre, merges = merge_strips(mesh, regions, _region_adjacency(mesh, regions), tol,
+                               stats.get('merge_tol') or MERGE_TOL_MIN, Region)
+    built = fresh(pre)
+    solid, bstats = build_solid(mesh, built, fit_tol=tol, verbose=verbose)
+
+    def merge_of(r):
+        # the copy shares the merged region's params; a piece peeled off it
+        # names the merged region's position in src
+        for m in merges:
+            pos = next((i for i, x in enumerate(pre) if x is m[0]), None)
+            if r.params is m[0].params or (r.src and pos is not None and int(r.src[0]) == pos):
+                return m
+        return None
+    failed = []
+    for r in built:
+        if r.kind == 'extrusion' and r.built != 'analytic':
+            m = merge_of(r)
+            if m is not None and not any(m is f for f in failed):
+                failed.append(m)
+    if failed:
+        pre = [r for r in pre if not any(r is m[0] for m in failed)] + [s_ for m in failed for s_ in m[1]]
+        built = fresh(pre)
+        solid, bstats = build_solid(mesh, built, fit_tol=tol, verbose=verbose)
+    kept = [m for m in merges if not any(m is f for f in failed)]
+    # the Boundary Fill export keeps the strips: its tools are planes, cones,
+    # cylinders, spheres and tori, and each strip is a plane that built
+    export_list = [r for r in built if r.kind != 'extrusion']
+    for m in kept:
+        for s_ in fresh(m[1]):
+            s_.built = 'analytic'
+            export_list.append(s_)
+    for i, r in enumerate(export_list):
+        r.id = i
+    stats['strips_merged'] = [{'strips': len(m[1]), 'faces_saved': len(m[1]) - 1} for m in kept]
+    if verbose and merges:
+        print(f"[fgroup] curved walls: {len(kept)} row(s) of flat strips -> one face each "
+              f"({sum(len(m[1]) for m in kept)} strips)"
+              f"{f'; {len(failed)} kept as strips (face would not build)' if failed else ''}")
     wp = finish_solid(cq.Workplane('XY').newObject([cq.Shape.cast(solid)]), verbose=False)
     shape = wp.val()
     if not BRepCheck_Analyzer(shape.wrapped).IsValid():
@@ -2610,13 +2676,13 @@ def convert(mesh, tol=0.08, verbose=False):
     stats.update({
         'regions': len(regions),
         'by_type': dict(by_type),
-        'unfitted_regions': sum(1 for r in regions if r.built != 'analytic'),
-        'unfitted_faces': int(sum(len(r.faces) for r in regions if r.built != 'analytic')),
+        'unfitted_regions': sum(1 for r in built if r.built != 'analytic'),
+        'unfitted_faces': int(sum(len(r.faces) for r in built if r.built != 'analytic')),
         'faces_out': len(shape.Faces()),
         'faces_by_kind': dict(kinds),
         'resid_max': float(max(r.resid for r in regions)) if regions else 0.0,
         'volume': float(shape.Volume()),
-        'export': {'regions': export_regions(mesh, consolidate_blends(mesh, regions, tol)),
+        'export': {'regions': export_regions(mesh, consolidate_blends(mesh, export_list, tol)),
                    'mesh_vertices': np.round(mesh.vertices, 4).tolist(),
                    'mesh_faces': mesh.faces.tolist(),
                    'mesh_volume': float(mesh.volume),
