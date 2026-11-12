@@ -21,18 +21,21 @@ def over_cap_message(count):
 
 
 def script(path, axis, frm, to, step, offsets, tol=0.08, units='mm', scale=1.0, join=2.5,
-           outline=False, trim=0.0, extrude=False, budget_s=None):
+           outline=False, trim=0.0, extrude=False, budget_s=None, tidy=False, sharpen=0.0):
     """Trace every plane in `offsets` and write the Fusion script: a
     construction plane and a fully enclosed sketch per slice. `extrude` also
     extrudes every slice to the next plane, so the stack comes out as solid
     slabs: the last slice one spacing further but never past the part's far
     face, and an end plane closer than half a spacing to the slice before it
     is drawn only, that slice's slab running through instead (no hair-thin
-    slab). Returns {'text', 'name', 'slices', 'notes'}; 'name' is the file
-    name's tail after the part's stem."""
+    slab). `tidy` / `sharpen` trace with tidy corners and draw the loops
+    through shared sketch points with tangent constraints. Returns {'text',
+    'name', 'slices', 'notes'}; 'name' is the file name's tail after the
+    part's stem."""
     from stl_to_solid.fusion_export import emit_fusion_xray_script
     from stl_to_solid.section_fit import STACK_EDGE_MM, open_outline_note, stack_extrudes
-    secs = trace_stack(path, axis, offsets, tol, units, scale, join, outline, trim, budget_s)
+    secs = trace_stack(path, axis, offsets, tol, units, scale, join, outline, trim, budget_s,
+                       tidy=tidy, sharpen=sharpen)
     n = len(secs)
     exts = [None] * n
     if extrude:
@@ -64,7 +67,12 @@ def script(path, axis, frm, to, step, offsets, tol=0.08, units='mm', scale=1.0, 
         notes.insert(0, 'WARNING: ' + open_note)
     lo, hi = sorted((frm, to))
     title = f'X-Ray {axis.upper()} {lo:+.1f}..{hi:+.1f} mm every {step:g} mm'
-    text = emit_fusion_xray_script(sections, title=title, notes=notes)
+    if sharpen > 0:
+        k = sum(s['stats'].get('sharpened', 0) for s in secs)
+        if k:
+            notes.append(f"{k} round{'s' if k != 1 else ''} under {sharpen:g} mm drawn as sharp "
+                         "corners (Sharpen rounds below)")
+    text = emit_fusion_xray_script(sections, title=title, notes=notes, tidy=tidy)
     suffix = '_solid' if extrude and n > 1 else ''
     return {'text': text, 'name': f'_xray_{axis}{lo:+.1f}_{hi:+.1f}_s{step:g}{suffix}.py',
             'slices': n, 'notes': notes}

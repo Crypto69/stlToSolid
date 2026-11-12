@@ -373,6 +373,8 @@ same thing without a download.
 | **Join gaps up to** | 2.5 mm | As in Sliced Loft (section 4.3). X-Ray keeps its own value. |
 | **Trim slivers up to** | 0 mm | As in Sliced Loft. X-Ray keeps its own value, so a trim set for a leaky loft does not eat the thin walls of the next part. If slivers were trimmed anywhere in the stack, a note says in how many slices. |
 | **Outline only** | off | Just the outer outline of each slice: holes, islands and loose pieces are left out. About five times faster on organic shapes. |
+| **Tidy corners (tangent fillets, sharp creases)** | off | Fillets are solved to meet their walls tangent and corners meet exactly. In the Fusion script the curves of each loop share their end points and every fillet gets a tangent constraint, so the sketch behaves like one you drew. The summary says how many junctions are tangent. Off draws the plain fit. |
+| **Sharpen rounds below** | 0.08 mm | Shown with Tidy corners. A round between two walls that stays within this distance of their corner is drawn as the sharp corner, like Fusion's Fit Curves at the same tolerance. `0.08` turns rounds up to about 0.2 mm sharp. `0` keeps every round. The summary says how many were sharpened. |
 
 ### 5.3 Settings: slabs and the download
 
@@ -604,6 +606,8 @@ Add-Ins** instead. The Text Commands palette says where.
 | **Join gaps up to** | 2.5 mm | Loose ends closer than this are joined, so an outline broken only by hairline cracks between surface patches comes back as one closed profile. `0` draws exactly what Fusion's own mesh section draws. Raise it if the outline still comes back in pieces. Lower it if two unrelated pieces got joined. |
 | **Trim slivers up to** | 0 mm | Where the mesh has a double skin, the outline goes out and back along the same path and Fusion makes thin sliver profiles. Slivers narrower than this are cut out before fitting. `0.3` is a good start on a leaky mesh. `0` leaves the outline as traced. |
 | **Outline only** | off | Just the outer outline. Loose open pieces and inner loops (holes, islands) are skipped, so each sketch is one clean profile to extrude. The summary still says how many were skipped. |
+| **Tidy corners** | off | Fillets meet their walls tangent and corners meet exactly; the curves of each loop share their end points and every fillet gets a tangent constraint. The closing message says how many constraints were added (and how many Fusion refused). |
+| **Sharpen rounds below** | 0.08 mm | Shown with Tidy corners. Rounds that stay within this of their corner are drawn as the sharp corner. `0` keeps every round. |
 | **Extrude each slice** | off | Stack and X-Ray: each sketch's profile is extruded to the next slice and joined into one body, a stepped solid. Use this instead of Loft, which usually fails between two complex profiles. With Outline only ticked, only the outer shape is extruded. Without it, inner loops are filled as well. At 0.5 mm spacing the steps are hard to see. |
 | **Hide mesh after** | off | Hides the mesh body when it is done, so you can see the result. |
 
@@ -787,6 +791,7 @@ Text Commands**.
 | Slice spacing (Sliced Loft, X-Ray, Mesh to Outline) | 0.2 mm |
 | Join gaps up to | 2.5 mm |
 | Trim slivers up to | 0 mm |
+| Tidy corners (X-Ray, Mesh to Outline) | off; Sharpen rounds below 0.08 mm when on |
 | X-Ray limits | 500 slices, about 4 minutes of fitting per download |
 | Mesh to Outline stack | 10 sections (2 to 400) |
 | Blueprint effort | high |

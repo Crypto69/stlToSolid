@@ -906,6 +906,129 @@ def run(context):
 """
 
 
+# the drawing code with tidy corners: one copy here (embedded in the
+# X-Ray script only when tidy is on, so the default script is unchanged),
+# a textual copy in the Mesh to Outline add-in (desktop parity test)
+_DRAW_TIDY = """
+def _nearest_end(curve, target):
+    \"\"\"The end sketch point of `curve` nearest `target` (sketch space).
+    Fusion keeps an arc counter-clockwise, so a clockwise arc's
+    startSketchPoint is where it was asked to end.\"\"\"
+    a, b = curve.startSketchPoint, curve.endSketchPoint
+    return a if a.geometry.distanceTo(target) <= b.geometry.distanceTo(target) else b
+
+
+def draw_prims_tidy(sketch, prims, notes=None):
+    \"\"\"Tidy-corners twin of draw_prims: the curves of one loop or open
+    chain are chained through shared sketch points (each curve starts on
+    the previous curve's end point, a loop's last curve ends on the first
+    curve's start point), so Fusion sees them connected, and every
+    junction the section data marks tangent ('tan1' on a curve, 'tan0' on
+    the next) gets a tangent constraint. A curve Fusion refuses on shared
+    points is drawn from plain points instead, with draw_prims's
+    fallbacks. `notes` also counts 'tangent' (constraints added) and
+    'tangent_failed'. Returns the curve count.\"\"\"
+    notes = {} if notes is None else notes
+    if isinstance(prims, dict) or len(prims) < 2:
+        return draw_prims(sketch, prims, notes)
+    curves = sketch.sketchCurves
+
+    def P(p):
+        return sketch.modelToSketchSpace(
+            adsk.core.Point3D.create(p[0] / 10.0, p[1] / 10.0, p[2] / 10.0))
+
+    def ends(p):
+        if p['type'] == 'spline':
+            return p['pts'][0], p['pts'][-1]
+        return p['p0'], p['p1']
+
+    def bump(key):
+        notes[key] = notes.get(key, 0) + 1
+
+    a0, z1 = ends(prims[0])[0], ends(prims[-1])[1]
+    closed = sum((x - y) ** 2 for x, y in zip(a0, z1)) < 1e-12
+    first, prev_end, made, n = None, None, [], 0
+    for k, p in enumerate(prims):
+        q0, q1 = ends(p)
+        start = prev_end if prev_end is not None else P(q0)
+        end = first if (closed and k == len(prims) - 1 and first is not None) else P(q1)
+        curve, ok = None, True
+        try:
+            if p['type'] == 'line':
+                curve = curves.sketchLines.addByTwoPoints(start, end)
+            elif p['type'] == 'arc':
+                curve = curves.sketchArcs.addByThreePoints(start, P(p['mid']), end)
+            else:
+                pc = adsk.core.ObjectCollection.create()
+                pc.add(start)
+                for q in p['pts'][1:-1]:
+                    pc.add(P(q))
+                pc.add(end)
+                curve = curves.sketchFittedSplines.add(pc)
+        except Exception:
+            ok = False
+        if not ok:
+            n += draw_prims(sketch, [p], notes)
+        else:
+            n += 1
+        if curve is None:
+            prev_end = None
+            made.append((p, None))
+            continue
+        if k == 0:
+            first = _nearest_end(curve, P(q0))
+        prev_end = _nearest_end(curve, P(q1))
+        made.append((p, curve))
+    gc = sketch.geometricConstraints
+    pairs = list(zip(made, made[1:]))
+    if closed:
+        pairs.append((made[-1], made[0]))
+    for (pa, ca), (pb, cb) in pairs:
+        if not (pa.get('tan1') and pb.get('tan0')):
+            continue
+        if ca is None or cb is None:
+            bump('tangent_failed')
+            continue
+        try:
+            gc.addTangent(ca, cb)
+            bump('tangent')
+        except Exception:
+            bump('tangent_failed')
+    return n
+"""
+
+_XRAY_TIDY_RUNTIME = ("""
+
+# ---- tidy corners: shared sketch points + tangent constraints
+""" + _DRAW_TIDY + """
+
+def draw_section(sketch, sec, notes=None):
+    \"\"\"draw_section with tidy corners (replaces the plain one above).\"\"\"
+    notes = {} if notes is None else notes
+    n = 0
+    for outer, holes in sec['loops']:
+        n += draw_prims_tidy(sketch, outer, notes)
+        for h in holes:
+            n += draw_prims_tidy(sketch, h, notes)
+    for chain in sec.get('open', []):
+        n += draw_prims_tidy(sketch, chain, notes)
+    _tidy_note(notes)
+    return n
+
+
+def _tidy_note(drawn):
+    \"\"\"Keep one sentence in NOTES saying how many tangent constraints
+    were added (the closing message prints NOTES).\"\"\"
+    s = 'Tidy corners: %d tangent constraint(s) added' % drawn.get('tangent', 0)
+    if drawn.get('tangent_failed'):
+        s += ', %d Fusion refused' % drawn['tangent_failed']
+    if NOTES and NOTES[-1].startswith('Tidy corners:'):
+        NOTES[-1] = s
+    else:
+        NOTES.append(s)
+""")
+
+
 def _xray_round(x, nd=4):
     """Plain lists / dicts of rounded floats for embedding in the script."""
     if isinstance(x, dict):
@@ -921,7 +1044,7 @@ def _xray_round(x, nd=4):
     return x
 
 
-def emit_fusion_xray_script(sections, title='X-Ray', notes=()):
+def emit_fusion_xray_script(sections, title='X-Ray', notes=(), tidy=False):
     """Fusion script for a stack of section sketches, the way the add-in
     does it: the sections are embedded once as data and a small loop draws
     them (one construction plane + one sketch each, curves drawn with
@@ -934,7 +1057,11 @@ def emit_fusion_xray_script(sections, title='X-Ray', notes=()):
     after drawing: the profiles whose area matches a loop's material area
     (so a hole's interior, which Fusion lists as a profile too, stays
     open), each joined to the slabs so far, so the stack comes out as solid
-    slices. `notes` are sentences the script adds to its closing message."""
+    slices. `notes` are sentences the script adds to its closing message.
+    With `tidy` (the sections traced with tidy corners) each loop is drawn
+    through shared sketch points with tangent constraints where the data
+    marks them (`_XRAY_TIDY_RUNTIME`); without it the script is exactly
+    the plain one."""
     data = []
     for i, sec in enumerate(sections):
         data.append(_xray_round({
@@ -967,4 +1094,6 @@ def emit_fusion_xray_script(sections, title='X-Ray', notes=()):
     base = emit_fusion_script([])
     L.append(base[base.index('def _plane('):base.index('def _pick(')].rstrip('\n'))
     L.append(_XRAY_RUNTIME)
+    if tidy:
+        L.append(_XRAY_TIDY_RUNTIME)
     return '\n'.join(L)

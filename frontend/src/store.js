@@ -142,6 +142,11 @@ export const useConvertStore = defineStore('convert', {
     // thin walls of the next part put through the X-Ray
     xrayJoin: 2.5,
     xrayTrim: 0,
+    // X-Ray tidy corners: tangent fillets + exact corners, and rounds that
+    // stay within xraySharpen mm of their corner drawn sharp (off by
+    // default: the plain trace is unchanged)
+    xrayTidy: false,
+    xraySharpen: 0.08,
     // a plane slider waiting for a face click in the 3D view: the store key
     // it sets ('xrayFrom' | 'xrayTo' | 'sliceOffset'), or null; the note
     // says where the last pick put that plane ({ key, text })
@@ -383,6 +388,7 @@ export const useConvertStore = defineStore('convert', {
           bodies: [], triangleBody: null, selected: [], hovered: -1, bodiesError: null,
           sliceOffset: 0, sliceOutline: false, section: null, sectionError: null,
           xrayFrom: 0, xrayTo: 0, xrayExtrude: false, xrayTraces: [], xrayTotal: 0,
+          xrayTidy: false, xraySharpen: 0.08,
           xrayError: null, xrayTraceMs: null, exactExtent: null,
           planePick: null, planePickNote: null,
         })
@@ -555,6 +561,8 @@ export const useConvertStore = defineStore('convert', {
       this.params = { ...DEFAULT_PARAMS, method: this.tool === 'loft' ? 'loft' : 'auto' }
       this.xrayJoin = DEFAULT_PARAMS.slice_join
       this.xrayTrim = DEFAULT_PARAMS.slice_trim
+      this.xrayTidy = false
+      this.xraySharpen = 0.08
     },
 
     // Remember the part's exact side along `axis` (mm, converted frame), as
@@ -941,12 +949,19 @@ export const useConvertStore = defineStore('convert', {
 // The query every section trace and sketch download shares: the plane
 // (axis + offset from centre) and the fit settings.
 function sectionQuery(s, offset) {
-  return new URLSearchParams({
+  const q = new URLSearchParams({
     axis: s.resolvedSliceAxis, offset: String(offset), tol: String(s.params.tol),
     units: s.params.units, scale: String(s.params.scale),
     join: String(s.sliceJoin), outline: s.sliceOutline ? 'true' : 'false',
     trim: String(s.sliceTrim || 0),
   })
+  // tidy corners is an X-Ray option; left out when off, so those URLs
+  // stay as they were
+  if (s.tool === 'xray' && s.xrayTidy) {
+    q.set('tidy', 'true')
+    q.set('sharpen', String(s.xraySharpen || 0))
+  }
+  return q
 }
 
 // Before a plain <a download> link is followed: ask the server whether the

@@ -28,7 +28,7 @@ import math
 
 import numpy as np
 
-from .profile_fit import (_arc_mid, segment_polyline, snap_profile, solve_junctions,
+from .profile_fit import (_arc_mid, segment_polyline, solve_junctions,
                           try_full_circle)
 
 
@@ -843,8 +843,412 @@ def _replace_with_splines(prims, runs, tol, closed=True):
     return out
 
 
-def fit_loop(xy, tol=0.08, mesh_pts=None, min_prim_mm=None, min_run=3, clean=False,
-             closed=True):
+# ---------------------------------------------------------------------------
+# tidy corners: tiny rounds -> sharp creases, tangent fillets
+
+SHARPEN_MIN_TURN_DEG = 10.0
+TANGENT_FLAG_DEG = 0.05
+
+
+def _bump(stats, key, k=1):
+    if stats is not None:
+        stats[key] = stats.get(key, 0) + k
+
+
+def _raw(p):
+    q = p.get('_pts')
+    if q is None or len(q) < 2:
+        return np.asarray([p['p0'], p['p1']], float)
+    return np.asarray(q, float)
+
+
+def _fits_corner(pts, corner, wall, slack):
+    """True when no point of `pts` is further from the polyline `corner`
+    (a0 -> X -> b1) than max(slack, its distance from `wall`'s line)."""
+    from .profile_fit import _line_dir
+    pts = np.asarray(pts, float)
+    u = _line_dir(wall)
+    nrm = np.array([-u[1], u[0]])
+    own = np.abs((pts - np.asarray(wall['p0'], float)) @ nrm)
+    d = np.full(len(pts), np.inf)
+    for a, b in zip(corner[:-1], corner[1:]):
+        ab = b - a
+        t = np.clip(((pts - a) @ ab) / max(float(ab @ ab), 1e-18), 0.0, 1.0)
+        d = np.minimum(d, np.linalg.norm(pts - (a + t[:, None] * ab), axis=1))
+    return bool(np.all(d <= np.maximum(own, slack) + 1e-9))
+
+
+def _line_offset(pts, p):
+    """Worst distance of `pts` from the infinite line of line primitive p."""
+    from .profile_fit import _line_dir
+    u = _line_dir(p)
+    nrm = np.array([-u[1], u[0]])
+    return float(np.abs((np.asarray(pts, float) - np.asarray(p['p0'], float)) @ nrm).max())
+
+
+def sharpen_corners(prims, sharpen_mm, tol, closed=True, stats=None):
+    """Turn a small round between two straight walls into the sharp corner
+    where the walls meet (what Fusion's Fit Curves does to a round smaller
+    than its tolerance).
+
+    Anchors are lines at least max(0.6, 8*tol) long (fit_loop's
+    min_prim_mm rule). For two consecutive anchors A and B, the
+    primitives in between (crumbs, a tiny arc; none when the segmenter
+    already ran the walls into each other) are dropped and A and B are
+    extended to meet at X, the crossing of their lines, when: the walls
+    turn by at least 10 degrees; X lies ahead of A's start and before B's
+    end; X is no further from the run's ends than the run's length plus
+    2*sharpen_mm; the run is at most 20*sharpen_mm long; every raw point
+    of the run lies within `sharpen_mm` of A.p0 -> X -> B.p1; and A's and
+    B's own raw points fit that corner no worse than max(sharpen_mm,
+    their own lines). A 90 degree round of radius r sits 0.41*r off its
+    corner, so 0.08 mm sharpens rounds up to about 0.19 mm. A closed loop
+    never drops below 3 primitives. Runs on the segmenter's output, before
+    the spline fallback, so a wall whose end points ran past a tiny round
+    is not mistaken for a stretch the lines could not fit. In place;
+    stats['sharpened'] counts the rounds removed."""
+    from .profile_fit import _line_dir, _line_line
+    n = len(prims)
+    if sharpen_mm <= 0 or n < 2:
+        return prims
+    min_len = max(0.6, 8.0 * tol)
+    anchors = [i for i, p in enumerate(prims) if p['type'] == 'line' and _span_len(p) >= min_len]
+    if len(anchors) < 2:
+        return prims
+    # each wall's own least-squares line (the segmenter draws a line as the
+    # chord between two raw points; on a noisy section with a tiny round at
+    # each end both are on the rounds, and the chord sits up to 0.1 mm
+    # inside the wall)
+    walls = {i: _wall_line(prims[i], 2.0 * sharpen_mm + tol) for i in anchors}
+    pairs = list(zip(anchors, anchors[1:]))
+    if closed:
+        pairs.append((anchors[-1], anchors[0]))
+    drop = set()
+    cos_min = math.cos(math.radians(SHARPEN_MIN_TURN_DEG))
+    for ia, ib in pairs:
+        run = [(ia + k) % n for k in range(1, (ib - ia) % n)]
+        if any(k in drop for k in run):
+            continue
+        if closed and n - len(drop) - len(run) < 3:
+            continue
+        A, B = prims[ia], prims[ib]
+        (ca, da), (cb, db) = walls[ia], walls[ib]
+        if float(da @ db) > cos_min:
+            continue                                  # (nearly) straight on
+        a0 = ca + ((np.asarray(A['p0'], float) - ca) @ da) * da
+        b1 = cb + ((np.asarray(B['p1'], float) - cb) @ db) * db
+        WA = {'p0': a0, 'p1': a0 + da}
+        WB = {'p0': b1 - db, 'p1': b1}
+        X = _line_line(WA, WB)
+        if X is None:
+            continue
+        if (X - a0) @ da <= 0 or (b1 - X) @ db <= 0:
+            continue
+        run_len = sum(_span_len(prims[k]) for k in run)
+        if run_len > 20.0 * sharpen_mm:
+            continue
+        reach = run_len + 2.0 * sharpen_mm
+        if (np.linalg.norm(X - np.asarray(A['p1'], float)) > reach
+                or np.linalg.norm(X - np.asarray(B['p0'], float)) > reach):
+            continue
+        corner = np.vstack([a0, X, b1])
+        ra, rb = _raw(A), _raw(B)
+        mid = np.vstack([_raw(prims[k]) for k in run]) if run else np.zeros((0, 2))
+        if len(mid) and _open_polyline_dev(mid, corner) > sharpen_mm:
+            continue
+        # A's and B's own points: none further from the corner than
+        # max(sharpen_mm, from their own wall line)
+        # (the far ends run on: points round the walls' other corners are
+        # measured square to the wall, as their own line measures them)
+        far = np.vstack([a0 - da * (reach + 1.0), X, b1 + db * (reach + 1.0)])
+        if not (_fits_corner(ra, far, WA, sharpen_mm) and _fits_corner(rb, far, WB, sharpen_mm)):
+            continue
+        # the raw points from A through the run to B, split at the one
+        # nearest the corner: A keeps those before it, B those after
+        allraw = np.vstack([ra, mid, rb])
+        k = int(np.argmin(np.linalg.norm(allraw - X, axis=1)))
+        _move_end(prims, ia, 'p0', a0, closed)
+        _move_end(prims, ib, 'p1', b1, closed)
+        A['p1'] = X.copy()
+        B['p0'] = X.copy()
+        A['_pts'] = np.vstack([allraw[:k + 1], [X]])
+        B['_pts'] = np.vstack([[X], allraw[k:]])
+        if run:
+            drop.update(run)
+            _bump(stats, 'sharpened')
+    if drop:
+        prims[:] = [p for i, p in enumerate(prims) if i not in drop]
+    return prims
+
+
+def _wall_line(p, trim):
+    """(point, unit dir) of the least-squares line through a line
+    primitive's raw points, leaving out those within `trim` of its ends
+    (a tiny round there pulls the fit off the wall); oriented p0 -> p1."""
+    from .profile_fit import _line_dir, fit_line
+    pts = _raw(p)
+    u = _line_dir(p)
+    t = (pts - np.asarray(p['p0'], float)) @ u
+    L = float(t.max()) if len(t) else 0.0
+    trim = min(trim, 0.25 * L)
+    core = pts[(t >= trim) & (t <= L - trim)]
+    if len(core) < 3:
+        core = pts
+    if len(core) < 3:
+        return np.asarray(p['p0'], float), u
+    f = fit_line(core)
+    d = np.asarray(f['dir'], float)
+    if d @ u < 0:
+        d = -d
+    return np.asarray(f['point'], float), d
+
+
+def refit_walls(prims, tol, closed=True):
+    """Redraw every line at least max(0.6, 8*tol) long on the least-squares
+    line of its own raw points (`_wall_line`) instead of the chord between
+    its two end points, when that fits its points better: on a noisy
+    section the chord ends sit on the rounds at either end, a few hundredths
+    inside the wall, and the whole wall reads as a stretch the lines could
+    not fit (a spline, a lost fillet). The ends are projected onto the new
+    line and the neighbours' shared ends follow; an end that would move
+    more than 2*tol is left alone. In place."""
+    min_len = max(0.6, 8.0 * tol)
+    for i, p in enumerate(prims):
+        if p['type'] != 'line' or _span_len(p) < min_len:
+            continue
+        pts = _raw(p)
+        if len(pts) < 3:
+            continue
+        c, u = _wall_line(p, tol)
+        q0 = c + ((np.asarray(p['p0'], float) - c) @ u) * u
+        q1 = c + ((np.asarray(p['p1'], float) - c) @ u) * u
+        if (np.linalg.norm(q0 - p['p0']) > 2.0 * tol or np.linalg.norm(q1 - p['p1']) > 2.0 * tol
+                or (q1 - q0) @ (np.asarray(p['p1'], float) - np.asarray(p['p0'], float)) <= 0):
+            continue
+        if _open_polyline_dev(pts, np.vstack([q0, q1])) >= _prim_dev(p):
+            continue
+        _move_end(prims, i, 'p0', q0, closed)
+        _move_end(prims, i, 'p1', q1, closed)
+    return prims
+
+
+def _move_end(prims, i, key, x, closed):
+    """Put end `key` of primitive i at x, and the neighbour's shared end
+    with it (the move is the wall's refit, a fraction of tol)."""
+    n = len(prims)
+    prims[i][key] = np.asarray(x, float).copy()
+    j = i - 1 if key == 'p0' else i + 1
+    if not closed and not 0 <= j < n:
+        return
+    other = prims[j % n]
+    if other is prims[i]:
+        return
+    other['p1' if key == 'p0' else 'p0'] = np.asarray(x, float).copy()
+
+
+def _prim_snapshot(p):
+    return {k: (np.array(v, float) if isinstance(v, np.ndarray) else v) for k, v in p.items()}
+
+
+def _restore(p, snap):
+    p.clear()
+    p.update(snap)
+
+
+def _drift(p, snap):
+    """How far a primitive's drawn geometry moved from its snapshot: its
+    end points, and an arc's mid point (catches an arc that flipped to
+    the long way round). inf when a line reversed."""
+    d = max(float(np.linalg.norm(np.asarray(p['p0'], float) - np.asarray(snap['p0'], float))),
+            float(np.linalg.norm(np.asarray(p['p1'], float) - np.asarray(snap['p1'], float))))
+    if p['type'] == 'line':
+        old = np.asarray(snap['p1'], float) - np.asarray(snap['p0'], float)
+        new = np.asarray(p['p1'], float) - np.asarray(p['p0'], float)
+        if float(old @ new) <= 0:
+            return float('inf')
+    elif p['type'] == 'arc':
+        d = max(d, float(np.linalg.norm(_arc_mid(p) - _arc_mid(snap))))
+    return d
+
+
+def _run_dev(run, closed):
+    """Worst distance from the run's raw points to its drawn curves."""
+    raw = np.vstack([_raw(p) for p in run])
+    raw = raw[::max(1, len(raw) // 600)]
+    poly = prim_points(run, arc_step_deg=2.0, closed=closed)
+    if closed:
+        return polyline_deviation(raw, poly)
+    return _open_polyline_dev(raw, poly)
+
+
+def _pre_fillets(run, closed, max_deg, tol, check=None):
+    """Solve as true fillets the arcs between two lines whose ends are
+    within `max_deg` of those lines (profile_fit.solve_junctions only
+    takes 3 degrees; a fillet on a section of a mesh kinks up to 16, and
+    up to 20 where the lines took the round's ends), and make an arc that
+    meets one line within `max_deg` tangent to it. Each move is undone on
+    its own when it takes those curves further from their raw points than
+    max(tol, before) (measured by `check(group)`, default the curves'
+    own raw points)."""
+    from .profile_fit import _arc_tangent_at, _line_dir, _make_tangent, _solve_fillet
+    n = len(run)
+    cos_max = math.cos(math.radians(max_deg))
+
+    def near(line, arc, at):
+        return abs(float(_arc_tangent_at(arc, at) @ _line_dir(line))) >= cos_max
+
+    done = set()
+    for i, arc in enumerate(run):
+        if arc['type'] != 'arc' or arc.get('full'):
+            continue
+        has_prev = closed or i > 0
+        has_next = closed or i < n - 1
+        prev = run[(i - 1) % n] if has_prev else None
+        nxt = run[(i + 1) % n] if has_next else None
+        lp = prev is not None and prev['type'] == 'line' and prev is not arc
+        ln = nxt is not None and nxt['type'] == 'line' and nxt is not arc and nxt is not prev
+        group = [q for q in (prev, arc, nxt) if q is not None]
+        snap = [_prim_snapshot(q) for q in group]
+        check = check or (lambda g: _run_dev(g, False))
+        dev0 = check(group)
+        moved = False
+        if lp and ln and near(prev, arc, arc['p0']) and near(nxt, arc, arc['p1']):
+            moved = _solve_fillet(prev, arc, nxt)
+        elif lp and not ln and near(prev, arc, arc['p0']):
+            # one line only (the other side an arc, a run end or a spline)
+            x = _make_tangent(prev, arc)
+            arc['p0'] = x.copy()
+            prev['p1'] = x.copy()
+            moved = True
+        elif ln and not lp and near(nxt, arc, arc['p1']):
+            x = _make_tangent(nxt, arc)
+            arc['p1'] = x.copy()
+            nxt['p0'] = x.copy()
+            moved = True
+        if moved and check(group) > max(tol, dev0):
+            for q, sn in zip(group, snap):
+                _restore(q, sn)
+            moved = False
+        if moved:
+            done.add(i)
+    return done
+
+
+TIDY_FILLET_DEG = 30.0
+
+
+def tidy_junctions(prims, tol, closed=True, stats=None, raw=None):
+    """Re-solve the junctions between lines and arcs the way the prismatic
+    engine does (`profile_fit.solve_junctions`): true tangent fillets
+    between two lines, an arc made tangent to a line it nearly follows,
+    exact line/line corners. An arc's ends may be up to 30 degrees off its
+    lines to count as a fillet (`_pre_fillets`). No frame snapping and no
+    radius merging (they move free ends and cost accuracy on organic
+    parts). Splines bound the runs: a loop without one is solved closed,
+    otherwise each run of two or more lines/arcs is solved as an open
+    chain. A run is put back as it was (stats['tidy_reverted']) when the
+    solve moves an end point (or an arc's mid point) by more than
+    max(0.5, 5*tol), reverses a line, or takes the drawn curves further
+    from the raw points than max(tol, before). `raw` (the loop's own
+    section points) makes that check use every raw point near the moved
+    curves against the whole loop; without it, the curves' own points.
+    In place."""
+    n = len(prims)
+    if n < 2:
+        return prims
+    limit = max(0.5, 5.0 * tol)
+    raw = None if raw is None else np.asarray(raw, float)
+
+    def check(group, run_closed=False):
+        if raw is None or not len(raw):
+            return _run_dev(group, run_closed)
+        box = np.vstack([_raw(p) for p in group])
+        lo, hi = box.min(0) - tol, box.max(0) + tol
+        sel = raw[np.all((raw >= lo) & (raw <= hi), axis=1)]
+        if not len(sel):
+            return 0.0
+        poly = prim_points(prims, arc_step_deg=2.0, closed=closed)
+        return polyline_deviation(sel, poly) if closed else _open_polyline_dev(sel, poly)
+
+    is_spline = [p['type'] == 'spline' for p in prims]
+    if not any(is_spline):
+        runs = [(list(range(n)), closed)]
+    elif all(is_spline):
+        return prims
+    else:
+        if closed:
+            start = next(i for i in range(n) if is_spline[i])
+            order = [(start + k) % n for k in range(1, n + 1)]
+        else:
+            order = list(range(n))
+        runs, cur = [], []
+        for i in order:
+            if is_spline[i]:
+                if len(cur) >= 2:
+                    runs.append((cur, False))
+                cur = []
+            else:
+                cur.append(i)
+        if len(cur) >= 2:
+            runs.append((cur, False))
+    for idx, run_closed in runs:
+        run = [prims[i] for i in idx]
+        snap = [_prim_snapshot(p) for p in run]
+        dev0 = check(run, run_closed)
+        _pre_fillets(run, run_closed, TIDY_FILLET_DEG, tol, check)
+        solve_junctions(run, closed=run_closed)
+        for p in run:
+            p.pop('_pin_p0', None)
+            p.pop('_pin_p1', None)
+        bad = any(_drift(p, s) > limit for p, s in zip(run, snap))
+        if not bad and check(run, run_closed) > max(tol, dev0):
+            bad = True
+        if bad:
+            for p, s in zip(run, snap):
+                _restore(p, s)
+            _bump(stats, 'tidy_reverted')
+    return prims
+
+
+def _end_dir(p, end):
+    """Unit direction of travel of a primitive at its start (end=False) or
+    end (end=True)."""
+    from .profile_fit import _arc_tangent_at, _line_dir
+    if p['type'] == 'line':
+        return _line_dir(p)
+    if p['type'] == 'arc':
+        return _arc_tangent_at(p, p['p1'] if end else p['p0'])
+    q = np.asarray(p['pts'], float)
+    d = (q[-1] - q[-2]) if end else (q[1] - q[0])
+    L = np.linalg.norm(d)
+    return d / L if L > 1e-12 else d
+
+
+def flag_tangents(prims, closed=True, deg=TANGENT_FLAG_DEG):
+    """Mark every line/arc, arc/line and arc/arc junction where the two
+    curves meet at one point and leave it in the same direction (within
+    `deg`): a['tan1'] = b['tan0'] = True, which the Fusion drawing turns
+    into a tangent constraint. Returns how many junctions were marked."""
+    if isinstance(prims, dict) or len(prims) < 2:
+        return 0
+    n = len(prims)
+    cos_max = math.cos(math.radians(deg))
+    k = 0
+    for i in range(n if closed else n - 1):
+        a, b = prims[i], prims[(i + 1) % n]
+        if a is b or 'arc' not in (a['type'], b['type']) or 'spline' in (a['type'], b['type']):
+            continue
+        if np.linalg.norm(np.asarray(a['p1'], float) - np.asarray(b['p0'], float)) > 1e-9:
+            continue
+        if float(_end_dir(a, True) @ _end_dir(b, False)) >= cos_max:
+            a['tan1'] = True
+            b['tan0'] = True
+            k += 1
+    return k
+
+
+def fit_loop(xy, tol=0.08, mesh_pts=None, min_prim_mm=None, min_run=3, tidy=False,
+             sharpen_mm=0.0, closed=True, stats=None):
     """Redraw one 2-D loop (or, with closed=False, one open chain) as
     sketch primitives.
 
@@ -860,12 +1264,16 @@ def fit_loop(xy, tol=0.08, mesh_pts=None, min_prim_mm=None, min_run=3, clean=Fal
     polyline and keeps its two free ends exactly where the section put
     them; a whole-chain spline comes back with 'closed': False.
 
-    `clean=True` also runs the prismatic engine's frame snapping and
-    tangent junction solving (squared-up lines, true fillets). Off by
-    default: on an organic section those moves cost more accuracy than
-    they buy (measured on the RC-N2 controller: twice as many primitives
-    off by more than tol). `mesh_pts` (optional, 2-D) refines arc fits on
-    nearby mesh vertices, as the prismatic engine does.
+    Tidy corners (both off by default, so the plain fit is unchanged):
+    `sharpen_mm` > 0 turns a round between two walls that stays within
+    that distance of their corner into the sharp corner
+    (`sharpen_corners`); `tidy=True` re-solves the line/arc junctions as
+    true fillets and exact corners (`tidy_junctions`, no frame snapping)
+    and marks the tangent junctions 'tan0'/'tan1' (`flag_tangents`) so
+    the Fusion drawing can constrain them. `stats` (a dict, optional)
+    counts 'sharpened', 'tidy_reverted' and 'tangent'. `mesh_pts`
+    (optional, 2-D) refines arc fits on nearby mesh vertices, as the
+    prismatic engine does.
     """
     from .profile_fit import refine_arcs_with_points
     pts = np.asarray(xy, float)
@@ -908,11 +1316,12 @@ def fit_loop(xy, tol=0.08, mesh_pts=None, min_prim_mm=None, min_run=3, clean=Fal
                  'p1': pts[keep][0].copy(), 'closed': True, '_pts': pts}]
     if mesh_pts is not None:
         refine_arcs_with_points(prims, mesh_pts, tol)
-    if clean:
-        prims = snap_profile(prims)
-        solve_junctions(prims, closed=closed)
     if min_prim_mm is None:
         min_prim_mm = max(0.6, 8.0 * tol)
+    if tidy:
+        refit_walls(prims, tol, closed)
+    if sharpen_mm > 0:
+        sharpen_corners(prims, sharpen_mm, tol, closed, stats)
     runs = _fragment_runs(prims, min_prim_mm, min_run, tol, closed)
     if runs and len(runs) == 1 and len(runs[0]) == len(prims):
         # the whole loop is one curve: a single spline
@@ -926,8 +1335,13 @@ def fit_loop(xy, tol=0.08, mesh_pts=None, min_prim_mm=None, min_run=3, clean=Fal
         q = raw[douglas_peucker(raw, tol / 2)]
         return [{'type': 'spline', 'pts': q, 'p0': q[0].copy(), 'p1': q[-1].copy(),
                  'closed': False, '_pts': raw}]
-    prims = _close_junctions(_replace_with_splines(prims, runs, tol, closed), closed)
-    return _uncross(prims, tol, closed)
+    prims = _replace_with_splines(prims, runs, tol, closed)
+    if tidy:
+        tidy_junctions(prims, tol, closed, stats, raw=pts)
+    prims = _uncross(_close_junctions(prims, closed), tol, closed)
+    if tidy:
+        _bump(stats, 'tangent', flag_tangents(prims, closed))
+    return prims
 
 
 def drawn_ends(p):
@@ -1145,7 +1559,7 @@ def outer_only(loops):
 
 
 def fit_section(V, F, origin, normal, tol=0.08, mesh_pts=None, join_mm=0.0, trim_mm=0.0,
-                closed_only=False):
+                closed_only=False, tidy=False, sharpen_mm=0.0):
     """Cut and fit in one go. Returns {'origin', 'u', 'v', 'normal',
     'loops': [(outer_prims, [hole_prims...]), ...], 'open': [prims, ...]
     (open chains, fitted open), 'raw': the raw loops, 'raw_open': the raw
@@ -1160,13 +1574,15 @@ def fit_section(V, F, origin, normal, tol=0.08, mesh_pts=None, join_mm=0.0, trim
     trimmed nor fitted, which is most of the work on a busy section.
     Specks (loops under max(0.6, 8*tol) mm across) that cross a bigger
     outline or come within 2*tol of it are dropped (`drop_crossing_specks`), counted in
-    stats['specks']."""
+    stats['specks']. `tidy` and `sharpen_mm` are fit_loop's tidy-corner
+    options (both off by default); stats['tangent'], ['sharpened'] and
+    ['tidy_reverted'] count what they did."""
     loops, opens, frame, jst = section_curves(V, F, origin, normal, join_mm=join_mm)
     fitted, stats = [], dict(loops=0, holes=0, open=0, inner=0, lines=0, arcs=0, circles=0,
                              splines=0, joins=jst['joins'], max_gap=jst['max_gap'],
                              dev_max=0.0, junction_gap=0.0, trimmed=0, specks=0,
                              open_len=0.0, loop_len=0.0, open_max=0.0, loop_max=0.0,
-                             close_gap=0.0)
+                             close_gap=0.0, tangent=0, sharpened=0, tidy_reverted=0)
     # With Outline only an outline left open is dropped, and an X-Ray slab
     # with it (the RC-N1 controller's vent grate: mesh holes up to 34 mm
     # at the slots, whole outlines gone from X-Ray slices). When most of
@@ -1225,13 +1641,16 @@ def fit_section(V, F, origin, normal, tol=0.08, mesh_pts=None, join_mm=0.0, trim
             stats['junction_gap'] = max(stats['junction_gap'], junction_gap(prims, closed))
         if len(prims):
             sub = raw[::max(1, len(raw) // 400)]
-            dev = (polyline_deviation(sub, prim_points(prims)) if closed
-                   else _open_polyline_dev(sub, prim_points(prims, closed=False)))
+            # arcs at 1 degree: at 6 the chords of a 26 mm arc alone sit
+            # 0.036 mm off it, and the worst miss read that, not the fit
+            dev = (polyline_deviation(sub, prim_points(prims, arc_step_deg=1.0)) if closed
+                   else _open_polyline_dev(sub, prim_points(prims, arc_step_deg=1.0, closed=False)))
             stats['dev_max'] = max(stats['dev_max'], dev)
 
     for outer, holes in loops:
-        fo = fit_loop(outer, tol, mesh_pts)
-        fh = [fit_loop(h, tol, mesh_pts) for h in holes]
+        fo = fit_loop(outer, tol, mesh_pts, tidy=tidy, sharpen_mm=sharpen_mm, stats=stats)
+        fh = [fit_loop(h, tol, mesh_pts, tidy=tidy, sharpen_mm=sharpen_mm, stats=stats)
+              for h in holes]
         fitted.append((fo, fh))
         stats['loops'] += 1
         stats['holes'] += len(holes)
@@ -1239,7 +1658,8 @@ def fit_section(V, F, origin, normal, tol=0.08, mesh_pts=None, join_mm=0.0, trim
             tally(prims, raw, True)
     fopen = []
     for xy in opens:
-        prims = fit_loop(xy, tol, mesh_pts, closed=False)
+        prims = fit_loop(xy, tol, mesh_pts, closed=False, tidy=tidy, sharpen_mm=sharpen_mm,
+                         stats=stats)
         fopen.append(prims)
         stats['open'] += 1
         tally(prims, xy, False)
@@ -1260,19 +1680,24 @@ def lift_prims(prims, frame):
     out = []
     for p in prims:
         if p['type'] == 'line':
-            out.append({'type': 'line', 'p0': L(p['p0'])[0].tolist(), 'p1': L(p['p1'])[0].tolist()})
+            q = {'type': 'line', 'p0': L(p['p0'])[0].tolist(), 'p1': L(p['p1'])[0].tolist()}
         elif p['type'] == 'arc':
-            out.append({'type': 'arc', 'p0': L(p['p0'])[0].tolist(), 'p1': L(p['p1'])[0].tolist(),
-                        'mid': L(_arc_mid(p))[0].tolist(), 'r': float(p['r'])})
+            q = {'type': 'arc', 'p0': L(p['p0'])[0].tolist(), 'p1': L(p['p1'])[0].tolist(),
+                 'mid': L(_arc_mid(p))[0].tolist(), 'r': float(p['r'])}
         else:
             pts = np.asarray(p['pts'], float)
             if p.get('closed'):
                 pts = np.vstack([pts, pts[:1]])
-            out.append({'type': 'spline', 'pts': L(pts).tolist()})
+            q = {'type': 'spline', 'pts': L(pts).tolist()}
+        for key in ('tan0', 'tan1'):
+            if p.get(key):
+                q[key] = True
+        out.append(q)
     return out
 
 
-def section_preview(V, F, origin, normal, tol=0.08, join_mm=0.0, closed_only=False, trim_mm=0.0):
+def section_preview(V, F, origin, normal, tol=0.08, join_mm=0.0, closed_only=False, trim_mm=0.0,
+                    tidy=False, sharpen_mm=0.0):
     """One traced section for the web app and the sections script:
     {'origin', 'normal', 'loops': [(outer3d, [holes3d])], 'open':
     [prims3d...] (open chains), 'polylines': [[x, y, z]...] dense curves
@@ -1284,9 +1709,11 @@ def section_preview(V, F, origin, normal, tol=0.08, join_mm=0.0, closed_only=Fal
     open chains (loose pieces of a leaky mesh) and every inner loop (a
     hole, an island inside a hole) are left out of the drawing, an outline
     to extrude and nothing else; stats['open'] and stats['inner'] still
-    count them, so the caller can say how many were skipped."""
+    count them, so the caller can say how many were skipped. `tidy` and
+    `sharpen_mm` as fit_section; with tidy the lifted primitives carry
+    'tan0' / 'tan1' (tangent to the previous / next curve)."""
     sec = fit_section(V, F, origin, normal, tol=tol, join_mm=join_mm, trim_mm=trim_mm,
-                      closed_only=closed_only)
+                      closed_only=closed_only, tidy=tidy, sharpen_mm=sharpen_mm)
     frame = (sec['origin'], sec['u'], sec['v'], sec['normal'])
     loops, polys, areas = [], [], []
     for fo, fh in sec['loops']:

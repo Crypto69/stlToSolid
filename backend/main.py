@@ -257,7 +257,7 @@ def convert(job_id: str, params: ConvertParams):
 _AXES = ('x', 'y', 'z')
 
 
-def _check_slice_params(axis, tol, join, trim, step=None):
+def _check_slice_params(axis, tol, join, trim, step=None, sharpen=0.0):
     if axis not in _AXES:
         raise HTTPException(400, 'axis must be x, y or z')
     if not (0 < tol <= 5):
@@ -268,6 +268,8 @@ def _check_slice_params(axis, tol, join, trim, step=None):
         raise HTTPException(400, 'trim must be in [0, 5] mm')
     if step is not None and not (0 < step <= 50):
         raise HTTPException(400, 'step must be in (0, 50] mm')
+    if not (0 <= sharpen <= 1):
+        raise HTTPException(400, 'sharpen must be in [0, 1] mm')
 
 
 def _safe_stem(job):
@@ -300,7 +302,8 @@ async def loft_axis(job_id: str, units: str = 'mm', scale: float = 1.0, slice_mm
 @app.get('/api/jobs/{job_id}/section')
 async def section(job_id: str, axis: str = 'z', offset: float = 0.0, tol: float = 0.08,
                   units: str = 'mm', scale: float = 1.0, join: float = 2.5,
-                  outline: bool = False, trim: float = 0.0):
+                  outline: bool = False, trim: float = 0.0, tidy: bool = False,
+                  sharpen: float = 0.0):
     """One traced section of the uploaded mesh: the plane across `axis`
     at `offset` mm from the bounding-box centre (Fusion's section-plane
     slider), fitted as lines, arcs and splines within `tol`. Open chains
@@ -308,14 +311,16 @@ async def section(job_id: str, axis: str = 'z', offset: float = 0.0, tol: float 
     free ends within `join` mm of each other are joined (0 = never);
     `outline` leaves the open chains out (closed loops only); `trim` cuts
     slivers thinner than that many mm out of the closed loops (0 = off).
-    Returns the curves as 3-D polylines (mm, converted frame) for the
-    viewer plus the fit statistics."""
-    _check_slice_params(axis, tol, join, trim)
+    `tidy` re-solves the corners as tangent fillets and exact corners;
+    `sharpen` turns rounds that stay within that many mm of their corner
+    into sharp corners (0 = off). Returns the curves as 3-D polylines (mm,
+    converted frame) for the viewer plus the fit statistics."""
+    _check_slice_params(axis, tol, join, trim, sharpen=sharpen)
     _, src = _input_path(job_id)
     from .sections import trace
     try:
         return sanitize(await run_in_threadpool(trace, src, axis, offset, tol, units, scale, join,
-                                                outline, trim))
+                                                outline, trim, tidy, sharpen))
     except Exception as e:
         raise HTTPException(400, f'Could not trace the section: {describe(e)}')
 
@@ -323,17 +328,20 @@ async def section(job_id: str, axis: str = 'z', offset: float = 0.0, tol: float 
 @app.get('/api/jobs/{job_id}/section-script')
 async def section_script(job_id: str, axis: str = 'z', offset: float = 0.0, tol: float = 0.08,
                          units: str = 'mm', scale: float = 1.0, join: float = 2.5,
-                         outline: bool = False, trim: float = 0.0):
+                         outline: bool = False, trim: float = 0.0, tidy: bool = False,
+                         sharpen: float = 0.0):
     """The same section as a Fusion 360 script: one construction plane
     and one sketch of lines, arcs, circles and fitted splines (Create Mesh
-    Section Sketch + Fit Curves to Mesh Section, in one go)."""
-    _check_slice_params(axis, tol, join, trim)
+    Section Sketch + Fit Curves to Mesh Section, in one go). `tidy` and
+    `sharpen` change the traced geometry only (this script adds no
+    constraints; the X-Ray script does)."""
+    _check_slice_params(axis, tol, join, trim, sharpen=sharpen)
     job, src = _input_path(job_id)
     from .sections import trace
     from stl_to_solid.fusion_export import emit_fusion_sections_script
     try:
         sec = await run_in_threadpool(trace, src, axis, offset, tol, units, scale, join, outline,
-                                      trim)
+                                      trim, tidy, sharpen)
     except Exception as e:
         raise HTTPException(400, f'Could not trace the section: {describe(e)}')
     name = f"section {axis.upper()}={sec['at']:.2f} mm ({offset:+.1f} from centre)"
@@ -363,7 +371,8 @@ async def xray(job_id: str, axis: str = 'z', frm: float = Query(0.0, alias='from
 async def xray_script(job_id: str, axis: str = 'z', frm: float = Query(0.0, alias='from'),
                       to: float = 0.0, step: float = 0.2, tol: float = 0.08,
                       units: str = 'mm', scale: float = 1.0, join: float = 2.5,
-                      outline: bool = False, trim: float = 0.0, extrude: bool = False):
+                      outline: bool = False, trim: float = 0.0, extrude: bool = False,
+                      tidy: bool = False, sharpen: float = 0.0):
     """A stack of section sketches from `from` to `to` every `step` mm as
     one Fusion 360 script: a construction plane and a fully enclosed
     sketch per slice (lines, arcs, circles, fitted splines), drawn by the
@@ -372,8 +381,10 @@ async def xray_script(job_id: str, axis: str = 'z', frm: float = Query(0.0, alia
     one spacing further but never past the part's far face, and an end
     plane closer than half a spacing to the slice before it is drawn only,
     that slice's slab running through instead (no hair-thin slab). At most
-    XRAY_MAX slices and XRAY_BUDGET_S seconds of fitting."""
-    _check_slice_params(axis, tol, join, trim, step)
+    XRAY_MAX slices and XRAY_BUDGET_S seconds of fitting. `tidy` /
+    `sharpen` as /section; with tidy the sketches share their end points
+    and carry tangent constraints."""
+    _check_slice_params(axis, tol, join, trim, step, sharpen=sharpen)
     job, src = _input_path(job_id)
     from stl_to_solid.service import xray as _xray
     try:
@@ -384,7 +395,8 @@ async def xray_script(job_id: str, axis: str = 'z', frm: float = Query(0.0, alia
         raise HTTPException(400, _xray.over_cap_message(p['count']))
     try:
         s = await run_in_threadpool(_xray.script, src, axis, frm, to, step, p['offsets'], tol, units,
-                                    scale, join, outline, trim, extrude, XRAY_BUDGET_S)
+                                    scale, join, outline, trim, extrude, XRAY_BUDGET_S, tidy,
+                                    sharpen)
     except TimeoutError as e:
         raise HTTPException(400, str(e))
     except Exception as e:

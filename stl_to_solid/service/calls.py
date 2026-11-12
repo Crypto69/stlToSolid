@@ -72,7 +72,8 @@ def trace_section(in_path, out_path, params):
     from .sections import trace
     sec = trace(in_path, params['axis'], params.get('offset', 0.0), params.get('tol', 0.08),
                 params.get('units', 'mm'), params.get('scale', 1.0), params.get('join', 2.5),
-                params.get('outline', False), params.get('trim', 0.0))
+                params.get('outline', False), params.get('trim', 0.0),
+                tidy=params.get('tidy', False), sharpen=params.get('sharpen', 0.0))
     png = section_png(sec.pop('polylines'), params['axis'], sec['at'])
     sec['png_b64'] = base64.b64encode(png).decode('ascii')
     return sanitize(sec)
@@ -94,7 +95,8 @@ def xray_script(in_path, out_path, params):
                tol=params.get('tol', 0.08), units=params.get('units', 'mm'), scale=params.get('scale', 1.0),
                join=params.get('join', 2.5), outline=params.get('outline', False),
                trim=params.get('trim', 0.0), extrude=params.get('extrude', False),
-               budget_s=params.get('budget_s'))
+               budget_s=params.get('budget_s'), tidy=params.get('tidy', False),
+               sharpen=params.get('sharpen', 0.0))
     with open(out_path, 'w', encoding='utf-8') as f:
         f.write(s.pop('text'))
     return sanitize(s)

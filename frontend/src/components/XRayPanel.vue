@@ -23,7 +23,7 @@ const scheduleTrace = () => {
 }
 watch(() => [store.xrayFrom, store.xrayTo, store.xraySpacing, store.resolvedSliceAxis, store.params.tol,
              store.params.units, store.params.scale, store.jobId, store.xrayJoin, store.sliceOutline,
-             store.xrayTrim],
+             store.xrayTrim, store.xrayTidy, store.xraySharpen],
       ([, , , axis, , , , job]) => {
         // the old traces belong to the old planes: stop and drop them at once
         store.stopXray()

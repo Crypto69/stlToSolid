@@ -14,6 +14,12 @@ export function summarise(st, outline) {
   if (st.joins) tail = `; ${st.joins} gap${st.joins === 1 ? '' : 's'} joined (largest ${st.max_gap.toFixed(2)} mm)`
   if (st.trimmed) tail += `; ${st.trimmed} sliver${st.trimmed === 1 ? '' : 's'} trimmed`
   if (st.specks) tail += `; ${st.specks} speck${st.specks === 1 ? '' : 's'} on the outline dropped`
+  if (st.tangent || st.sharpened) {
+    const t = []
+    if (st.tangent) t.push(`${st.tangent} tangent`)
+    if (st.sharpened) t.push(`${st.sharpened} sharpened`)
+    tail += `; ${t.join(', ')}`
+  }
   if (st.bridged) tail += `; outline closed across ${st.bridged} mesh gap${st.bridged === 1 ? '' : 's'} (largest ${(st.bridge_max || 0).toFixed(2)} mm)`
   // the longest open piece is longer than the longest closed loop
   // (section_fit.outline_open): the outline has a mesh hole wider than

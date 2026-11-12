@@ -26,7 +26,7 @@ _ZERO_STATS = {'loops': 0, 'holes': 0, 'open': 0, 'inner': 0, 'lines': 0, 'arcs'
                'circles': 0, 'splines': 0, 'joins': 0, 'max_gap': 0.0, 'dev_max': 0.0,
                'junction_gap': 0.0, 'trimmed': 0, 'specks': 0, 'open_len': 0.0,
                'loop_len': 0.0, 'open_max': 0.0, 'loop_max': 0.0, 'close_gap': 0.0, 'bridged': 0,
-               'bridge_max': 0.0}
+               'bridge_max': 0.0, 'tangent': 0, 'sharpened': 0, 'tidy_reverted': 0}
 
 
 def _mesh(path, units, scale):
@@ -73,7 +73,7 @@ def half_extent(path, axis, units='mm', scale=1.0):
 
 
 def trace_stack(path, axis, offsets, tol=0.08, units='mm', scale=1.0, join=2.5, outline=False,
-                trim=0.0, budget_s=None):
+                trim=0.0, budget_s=None, tidy=False, sharpen=0.0):
     """One traced section per offset (mm from the bounding-box centre
     along `axis`, 'x'|'y'|'z'), the mesh loaded once and every plane cut
     with just the faces that span it. Each entry is the section_preview
@@ -81,7 +81,8 @@ def trace_stack(path, axis, offsets, tol=0.08, units='mm', scale=1.0, join=2.5, 
     along the axis; a plane no face crosses gives an entry with no curves
     and 'empty': True, so the numbering k/N stays honest. With `budget_s`
     the wall clock is checked between planes and a TimeoutError names how
-    many were done."""
+    many were done. `tidy` / `sharpen` (mm) are the tidy-corner options
+    (section_fit.fit_loop), off by default."""
     m = _mesh(path, units, scale)
     k = 'xyz'.index(axis)
     V, F = m.vertices, m.faces
@@ -105,14 +106,16 @@ def trace_stack(path, axis, offsets, tol=0.08, units='mm', scale=1.0, join=2.5, 
                    'polylines': [], 'areas_mm2': [], 'stats': dict(_ZERO_STATS), 'empty': True}
         else:
             sec = section_preview(V, F[mask], origin, normal, tol=tol, join_mm=join,
-                                  closed_only=outline, trim_mm=trim)
+                                  closed_only=outline, trim_mm=trim, tidy=tidy,
+                                  sharpen_mm=sharpen)
         sec.update(axis=axis, at=at, offset=float(off), centre=float(c[k]), extent=ext,
                    bbox_centre=np.asarray(c).tolist())
         out.append(sec)
     return out
 
 
-def trace(path, axis, offset, tol=0.08, units='mm', scale=1.0, join=2.5, outline=False, trim=0.0):
+def trace(path, axis, offset, tol=0.08, units='mm', scale=1.0, join=2.5, outline=False, trim=0.0,
+          tidy=False, sharpen=0.0):
     """Section of the mesh at `offset` mm from its bounding-box centre
     along `axis` ('x'|'y'|'z'), in the converted (mm) frame. Open chains
     stay open (a leaky mesh), but free ends within `join` mm of each other
@@ -120,4 +123,4 @@ def trace(path, axis, offset, tol=0.08, units='mm', scale=1.0, join=2.5, outline
     the section_preview dict plus 'at' (absolute mm coordinate), 'centre'
     and 'extent' along the axis, so the UI can place its slider."""
     return trace_stack(path, axis, [offset], tol=tol, units=units, scale=scale, join=join,
-                       outline=outline, trim=trim)[0]
+                       outline=outline, trim=trim, tidy=tidy, sharpen=sharpen)[0]
