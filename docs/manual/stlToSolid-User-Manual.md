@@ -384,6 +384,8 @@ same thing without a download.
 | Setting | Default | What it does |
 |---|---|---|
 | **Extrude each slice to the next (solid slabs)** | off | The script also extrudes every sketch up to the next plane and joins the slabs, giving one stepped solid that Fusion always builds. (A Loft between two complex profiles often folds over.) Holes along the axis stay open as long as their loops are drawn. Outline only leaves hole loops out, so it fills them. Needs at least two slices. |
+| **Add 2 rails (90° sections)** | off | Two more cuts, along the stack through the part's centre, shown in cyan in the view. See *Rails and loft* below. Needs at least two slices. |
+| **Loft profiles + rails (new body)** | off | Shown with rails. The script lofts one new body through the slices along the rails. Not with Extrude each slice. |
 
 The slices are traced one by one and stay in the view as they appear.
 Click **stop** to halt the tracing and **trace the rest** to carry on.
@@ -397,6 +399,27 @@ can be cancelled part-way.
 **Limits:** at most 500 slices and about 4 minutes of fitting per download.
 If you go over, raise the spacing, narrow the range, or tick **Outline
 only**.
+
+#### Rails and loft
+
+A Loft in Fusion follows the slices much better with rails, but Fusion
+refuses a rail that does not touch every profile exactly. The raw mesh cut
+misses the fitted outlines by up to the fit tolerance, so the rails here are
+pinned: where a rail crosses a slice, its point is moved onto that slice's
+fitted outline (onto the line or arc itself, and into a spline's fit points
+so the spline passes through it). The script writes every number at 6
+decimals when there are rails, so they still touch after rounding.
+
+- The two rail planes go through the part's centre and contain the stack's
+  axis. Each cuts the part's outer wall twice, so a simple part gets 4 rails.
+- A rail is *complete* when it crosses every slice once, close to its
+  outline. Others (a slot wall, a rail that misses a slice) are drawn but no
+  loft uses them. The closing message lists them.
+- Holes are ignored: the rails and the loft follow the outer outline.
+- The loft is best effort. If Fusion refuses the rails it tries without
+  them. If it refuses the loft too, the sketches and rails stay and the
+  message says why. It is skipped past 60 slices: use a bigger spacing for
+  a loft (5 mm on a hand-held part is a good start).
 
 ---
 
@@ -609,6 +632,8 @@ Add-Ins** instead. The Text Commands palette says where.
 | **Tidy corners** | off | Fillets meet their walls tangent and corners meet exactly; the curves of each loop share their end points and every fillet gets a tangent constraint. The closing message says how many constraints were added (and how many Fusion refused). |
 | **Sharpen rounds below** | 0.08 mm | Shown with Tidy corners. Rounds that stay within this of their corner are drawn as the sharp corner. `0` keeps every round. |
 | **Extrude each slice** | off | Stack and X-Ray: each sketch's profile is extruded to the next slice and joined into one body, a stepped solid. Use this instead of Loft, which usually fails between two complex profiles. With Outline only ticked, only the outer shape is extruded. Without it, inner loops are filled as well. At 0.5 mm spacing the steps are hard to see. |
+| **Add 2 rails (90° sections)** | off | Stack and X-Ray: two cuts along the stack through the mesh centre, drawn as splines on their own planes and pinned onto every slice's outline (see section 5, *Rails and loft*). The rail planes are built from a line on the picked plane, so they work in parametric designs too. |
+| **Loft profiles + rails (new body)** | off | Shown with rails. Lofts one new body through the slices along the complete rails, best effort, instead of Extrude each slice. |
 | **Hide mesh after** | off | Hides the mesh body when it is done, so you can see the result. |
 
 ### 7.4 Walk-through: from mesh to solid with X-Ray
@@ -792,6 +817,7 @@ Text Commands**.
 | Join gaps up to | 2.5 mm |
 | Trim slivers up to | 0 mm |
 | Tidy corners (X-Ray, Mesh to Outline) | off; Sharpen rounds below 0.08 mm when on |
+| Rails / loft (X-Ray, Mesh to Outline) | off; the loft is skipped past 60 slices |
 | X-Ray limits | 500 slices, about 4 minutes of fitting per download |
 | Mesh to Outline stack | 10 sections (2 to 400) |
 | Blueprint effort | high |

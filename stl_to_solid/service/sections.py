@@ -73,7 +73,7 @@ def half_extent(path, axis, units='mm', scale=1.0):
 
 
 def trace_stack(path, axis, offsets, tol=0.08, units='mm', scale=1.0, join=2.5, outline=False,
-                trim=0.0, budget_s=None, tidy=False, sharpen=0.0):
+                trim=0.0, budget_s=None, tidy=False, sharpen=0.0, two_d=False):
     """One traced section per offset (mm from the bounding-box centre
     along `axis`, 'x'|'y'|'z'), the mesh loaded once and every plane cut
     with just the faces that span it. Each entry is the section_preview
@@ -82,7 +82,9 @@ def trace_stack(path, axis, offsets, tol=0.08, units='mm', scale=1.0, join=2.5, 
     and 'empty': True, so the numbering k/N stays honest. With `budget_s`
     the wall clock is checked between planes and a TimeoutError names how
     many were done. `tidy` / `sharpen` (mm) are the tidy-corner options
-    (section_fit.fit_loop), off by default."""
+    (section_fit.fit_loop), off by default. With `two_d` the entries are
+    still in their planes' 2-D frames (section_preview_2d, for rails),
+    to be lifted with section_fit.lift_section."""
     m = _mesh(path, units, scale)
     k = 'xyz'.index(axis)
     V, F = m.vertices, m.faces
@@ -102,8 +104,19 @@ def trace_stack(path, axis, offsets, tol=0.08, units='mm', scale=1.0, join=2.5, 
         normal[k] = 1.0
         mask = (zmin <= at) & (zmax >= at)
         if not mask.any():
-            sec = {'origin': origin.tolist(), 'normal': normal.tolist(), 'loops': [], 'open': [],
-                   'polylines': [], 'areas_mm2': [], 'stats': dict(_ZERO_STATS), 'empty': True}
+            if two_d:
+                from stl_to_solid.section_fit import plane_basis
+                u, v, nn = plane_basis(normal)
+                sec = {'origin': origin, 'u': u, 'v': v, 'normal': nn, 'loops': [], 'open': [],
+                       'raw': [], 'raw_open': [], 'stats': dict(_ZERO_STATS), 'empty': True}
+            else:
+                sec = {'origin': origin.tolist(), 'normal': normal.tolist(), 'loops': [], 'open': [],
+                       'polylines': [], 'areas_mm2': [], 'stats': dict(_ZERO_STATS), 'empty': True}
+        elif two_d:
+            from stl_to_solid.section_fit import section_preview_2d
+            sec = section_preview_2d(V, F[mask], origin, normal, tol=tol, join_mm=join,
+                                     closed_only=outline, trim_mm=trim, tidy=tidy,
+                                     sharpen_mm=sharpen)
         else:
             sec = section_preview(V, F[mask], origin, normal, tol=tol, join_mm=join,
                                   closed_only=outline, trim_mm=trim, tidy=tidy,
@@ -111,6 +124,39 @@ def trace_stack(path, axis, offsets, tol=0.08, units='mm', scale=1.0, join=2.5, 
         sec.update(axis=axis, at=at, offset=float(off), centre=float(c[k]), extent=ext,
                    bbox_centre=np.asarray(c).tolist())
         out.append(sec)
+    return out
+
+
+def rails_for(path, axis, secs2d, tol=0.08, units='mm', scale=1.0, count=2):
+    """Rails (stl_to_solid.rails.trace_rails) for the traced 2-D sections
+    `secs2d` of a stack along `axis`: the rail planes go through the mesh's
+    bounding-box centre. Sections the planes miss are left out."""
+    from stl_to_solid.rails import trace_rails
+    m = _mesh(path, units, scale)
+    k = 'xyz'.index(axis)
+    n = np.zeros(3)
+    n[k] = 1.0
+    live = [s for s in secs2d if s['loops']]
+    return trace_rails(m.vertices, m.faces, n, m.bounding_box.centroid, live, tol=tol, count=count)
+
+
+def rails_preview(path, axis, frm_at, to_at, units='mm', scale=1.0, count=2):
+    """The raw rail cuts between two absolute axis positions, as
+    polylines for the viewer (no fitting, no pinning: cheap)."""
+    from stl_to_solid.rails import _pieces, rail_planes
+    from stl_to_solid.section_fit import chain_loops, cut_segments
+    m = _mesh(path, units, scale)
+    k = 'xyz'.index(axis)
+    n = np.zeros(3)
+    n[k] = 1.0
+    lo, hi = sorted((float(frm_at), float(to_at)))
+    out = []
+    for ro, rm in rail_planes(n, m.bounding_box.centroid, count):
+        P, S = cut_segments(m.vertices, m.faces, ro, rm)
+        for idx, closed in chain_loops(S):
+            Q = P[idx]
+            for piece in _pieces(Q, closed, Q @ n, lo, hi):
+                out.append(piece.tolist())
     return out
 
 

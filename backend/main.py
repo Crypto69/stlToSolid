@@ -372,7 +372,8 @@ async def xray_script(job_id: str, axis: str = 'z', frm: float = Query(0.0, alia
                       to: float = 0.0, step: float = 0.2, tol: float = 0.08,
                       units: str = 'mm', scale: float = 1.0, join: float = 2.5,
                       outline: bool = False, trim: float = 0.0, extrude: bool = False,
-                      tidy: bool = False, sharpen: float = 0.0):
+                      tidy: bool = False, sharpen: float = 0.0, rails: bool = False,
+                      loft: bool = False):
     """A stack of section sketches from `from` to `to` every `step` mm as
     one Fusion 360 script: a construction plane and a fully enclosed
     sketch per slice (lines, arcs, circles, fitted splines), drawn by the
@@ -383,7 +384,10 @@ async def xray_script(job_id: str, axis: str = 'z', frm: float = Query(0.0, alia
     that slice's slab running through instead (no hair-thin slab). At most
     XRAY_MAX slices and XRAY_BUDGET_S seconds of fitting. `tidy` /
     `sharpen` as /section; with tidy the sketches share their end points
-    and carry tangent constraints."""
+    and carry tangent constraints. `rails` adds two 90-degree sections
+    along the stack as loft rails pinned onto the profiles; `loft` (with
+    rails) lofts one new body through the profiles along them, best effort
+    (instead of `extrude`)."""
     _check_slice_params(axis, tol, join, trim, step, sharpen=sharpen)
     job, src = _input_path(job_id)
     from stl_to_solid.service import xray as _xray
@@ -396,12 +400,28 @@ async def xray_script(job_id: str, axis: str = 'z', frm: float = Query(0.0, alia
     try:
         s = await run_in_threadpool(_xray.script, src, axis, frm, to, step, p['offsets'], tol, units,
                                     scale, join, outline, trim, extrude, XRAY_BUDGET_S, tidy,
-                                    sharpen)
+                                    sharpen, rails, rails and loft)
     except TimeoutError as e:
         raise HTTPException(400, str(e))
     except Exception as e:
         raise HTTPException(400, f'Could not trace the sections: {describe(e)}')
     return _py_attachment(s['text'], _safe_stem(job) + s['name'])
+
+
+@app.get('/api/jobs/{job_id}/xray-rails')
+async def xray_rails(job_id: str, axis: str = 'z', frm: float = Query(0.0, alias='from'),
+                     to: float = 0.0, units: str = 'mm', scale: float = 1.0):
+    """Where an X-Ray's two rails run: the raw 90-degree cuts through the
+    part's centre along `axis`, clipped to the stack from `from` to `to`
+    (mm from the centre), as polylines for the viewer. Cheap: no fitting
+    and no pinning (the script does that, with the whole stack traced)."""
+    _check_slice_params(axis, 0.08, 0, 0)
+    _, src = _input_path(job_id)
+    from stl_to_solid.service import xray as _xray
+    try:
+        return sanitize(await run_in_threadpool(_xray.rails_preview, src, axis, frm, to, units, scale))
+    except Exception as e:
+        raise HTTPException(400, f'Could not cut the rails: {describe(e)}')
 
 
 # ---------------------------------------------------------------------------

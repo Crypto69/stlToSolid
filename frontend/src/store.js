@@ -71,6 +71,7 @@ let liveSeq = 0
 let traceSeq = 0
 let axisSeq = 0
 let xraySeq = 0
+let railSeq = 0
 // how many polls in a row may fail before the job is given up on: a
 // server busy for a second, or a laptop waking up, is not a lost job
 const POLL_MAX_MISSES = 8
@@ -132,6 +133,14 @@ export const useConvertStore = defineStore('convert', {
     xrayTo: 0,
     xraySpacing: 0.2,
     xrayExtrude: false,
+    // rails: two 90-degree sections along the stack (the script pins them
+    // onto the profiles); xrayRailLines is the raw preview cut
+    // ({ polylines, kind: 'rail' } or null); xrayLoft lofts one body
+    // through the profiles along the rails, instead of extruding
+    xrayRails: false,
+    xrayLoft: false,
+    xrayRailLines: null,
+    xrayRailsError: null,
     xrayTraces: [],
     xrayTotal: 0,
     xrayBusy: false,
@@ -318,10 +327,12 @@ export const useConvertStore = defineStore('convert', {
       if (s.tool === 'loft') return s.section ? [s.section] : []
       if (s.tool === 'xray') {
         const n = s.xrayTotal
-        return s.xrayTraces.map((sec, i) => ({
+        const traces = s.xrayTraces.map((sec, i) => ({
           ...sec,
           kind: n === 1 ? 'single' : i === 0 ? 'start' : i === n - 1 ? 'end' : 'mid',
         }))
+        // the rails first, so slices arriving one by one still only append
+        return s.xrayRails && s.xrayRailLines ? [s.xrayRailLines, ...traces] : traces
       }
       return []
     },
@@ -360,7 +371,11 @@ export const useConvertStore = defineStore('convert', {
       q.set('from', String(s.xrayFrom))
       q.set('to', String(s.xrayTo))
       q.set('step', String(s.xraySpacing))
-      if (s.xrayExtrude && s.xrayCount > 1) q.set('extrude', 'true')
+      if (s.xrayRails && s.xrayCount > 1) {
+        q.set('rails', 'true')
+        if (s.xrayLoft) q.set('loft', 'true')
+      }
+      if (s.xrayExtrude && s.xrayCount > 1 && !(s.xrayRails && s.xrayLoft)) q.set('extrude', 'true')
       return `/api/jobs/${s.jobId}/xray-script?${q}`
     },
   },
@@ -389,6 +404,7 @@ export const useConvertStore = defineStore('convert', {
           sliceOffset: 0, sliceOutline: false, section: null, sectionError: null,
           xrayFrom: 0, xrayTo: 0, xrayExtrude: false, xrayTraces: [], xrayTotal: 0,
           xrayTidy: false, xraySharpen: 0.08,
+          xrayRails: false, xrayLoft: false, xrayRailLines: null, xrayRailsError: null,
           xrayError: null, xrayTraceMs: null, exactExtent: null,
           planePick: null, planePickNote: null,
         })
@@ -563,6 +579,8 @@ export const useConvertStore = defineStore('convert', {
       this.xrayTrim = DEFAULT_PARAMS.slice_trim
       this.xrayTidy = false
       this.xraySharpen = 0.08
+      this.xrayRails = false
+      this.xrayLoft = false
     },
 
     // Remember the part's exact side along `axis` (mm, converted frame), as
@@ -886,6 +904,33 @@ export const useConvertStore = defineStore('convert', {
         if (mine === liveSeq) this.liveError = friendlyError(e)
       } finally {
         if (mine === liveSeq) this.liveBusy = false
+      }
+    },
+
+    // The raw rail cuts for the 3D view (cheap: no fitting). Only while
+    // the Rails tick is on; the last answer wins.
+    async fetchRails() {
+      const mine = ++railSeq
+      if (!this.xrayRails || !this.jobId || !this.resolvedSliceAxis || this.xrayFrom === this.xrayTo) {
+        this.xrayRailLines = null
+        this.xrayRailsError = null
+        return
+      }
+      const q = new URLSearchParams({
+        axis: this.resolvedSliceAxis, from: String(this.xrayFrom), to: String(this.xrayTo),
+        units: this.params.units, scale: String(this.params.scale),
+      })
+      try {
+        const res = await fetch(`/api/jobs/${this.jobId}/xray-rails?${q}`)
+        if (!res.ok) throw new Error(await errText(res))
+        const data = await res.json()
+        if (mine !== railSeq) return
+        this.xrayRailLines = markRaw({ polylines: data.polylines || [], kind: 'rail' })
+        this.xrayRailsError = null
+      } catch (e) {
+        if (mine !== railSeq) return
+        this.xrayRailLines = null
+        this.xrayRailsError = friendlyError(e)
       }
     },
 

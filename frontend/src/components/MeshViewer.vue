@@ -589,9 +589,11 @@ function drawSections() {
   for (let i = drawnSections.length; i < secs.length; i++) {
     const section = secs[i]
     const mid = section?.kind === 'mid'
+    const rail = section?.kind === 'rail'
     if (section?.polylines?.length) {
-      const mat = new THREE.LineBasicMaterial({ color: mid ? 0xe6b84f : 0xffd166, depthTest: false,
-                                                transparent: true, opacity: mid ? 0.7 : 0.95 })
+      const mat = new THREE.LineBasicMaterial({ color: rail ? 0x5ad2ea : mid ? 0xe6b84f : 0xffd166,
+                                                depthTest: false, transparent: true,
+                                                opacity: mid ? 0.7 : 0.95 })
       for (const poly of section.polylines) {
         const pts = poly.map(([x, y, z]) => new THREE.Vector3(x * k + meshShift.x, y * k + meshShift.y, z * k + meshShift.z))
         sectionLines.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), mat))

@@ -1712,8 +1712,23 @@ def section_preview(V, F, origin, normal, tol=0.08, join_mm=0.0, closed_only=Fal
     count them, so the caller can say how many were skipped. `tidy` and
     `sharpen_mm` as fit_section; with tidy the lifted primitives carry
     'tan0' / 'tan1' (tangent to the previous / next curve)."""
-    sec = fit_section(V, F, origin, normal, tol=tol, join_mm=join_mm, trim_mm=trim_mm,
-                      closed_only=closed_only, tidy=tidy, sharpen_mm=sharpen_mm)
+    return lift_section(section_preview_2d(V, F, origin, normal, tol=tol, join_mm=join_mm,
+                                           closed_only=closed_only, trim_mm=trim_mm, tidy=tidy,
+                                           sharpen_mm=sharpen_mm))
+
+
+def section_preview_2d(V, F, origin, normal, tol=0.08, join_mm=0.0, closed_only=False, trim_mm=0.0,
+                       tidy=False, sharpen_mm=0.0):
+    """The traced section still in its plane's 2-D frame (fit_section's
+    result): what rails edit (they add their crossings to the splines' fit
+    points) before `lift_section` turns it into section_preview's dict."""
+    return fit_section(V, F, origin, normal, tol=tol, join_mm=join_mm, trim_mm=trim_mm,
+                       closed_only=closed_only, tidy=tidy, sharpen_mm=sharpen_mm)
+
+
+def lift_section(sec):
+    """A 2-D traced section (section_preview_2d) -> section_preview's dict:
+    primitives in 3-D mm, drawing polylines, material areas, stats."""
     frame = (sec['origin'], sec['u'], sec['v'], sec['normal'])
     loops, polys, areas = [], [], []
     for fo, fh in sec['loops']:

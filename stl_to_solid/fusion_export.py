@@ -1029,6 +1029,110 @@ def _tidy_note(drawn):
 """)
 
 
+# rails + loft: embedded only when the script has rails (the default
+# script is unchanged); run() gets two hooks at emit time (_RAILS_HOOKS)
+_XRAY_RAILS_RUNTIME = """
+
+# ---- rails (90 degree sections pinned to the profiles) + best-effort loft
+
+LOFT_MAX = 60
+
+
+def draw_rails(root, notes):
+    \"\"\"One construction plane + sketch per rail plane, one fitted spline
+    per rail of RAILS. Returns [(rail, curve)] for the rails drawn.\"\"\"
+    sketches, out = {}, []
+    for r in RAILS:
+        key = tuple(round(c, 6) for c in r['plane']['normal'])
+        if key not in sketches:
+            k = len(sketches) + 1
+            pl, _ = _plane(root, tuple(c / 10.0 for c in r['plane']['origin']), tuple(r['plane']['normal']))
+            pl.name = 'rail plane %d' % k
+            sk = root.sketches.add(pl)
+            sk.name = 'rails %d' % k
+            sketches[key] = sk
+        sk = sketches[key]
+        pc = adsk.core.ObjectCollection.create()
+        for q in r['pts']:
+            pc.add(sk.modelToSketchSpace(adsk.core.Point3D.create(q[0] / 10.0, q[1] / 10.0, q[2] / 10.0)))
+        try:
+            out.append((r, sk.sketchCurves.sketchFittedSplines.add(pc)))
+        except Exception:
+            notes.append('%s: Fusion refused the rail' % r['name'])
+    return out
+
+
+def _loft_with_rails(root, drawn, rail_curves):
+    \"\"\"Loft one new body through the largest material profile of each
+    section sketch, guided by `rail_curves`. Without the rails if Fusion
+    refuses them. Returns how ('with N rails' / 'without rails (why)');
+    raises when Fusion refuses the loft both ways.\"\"\"
+    profs = []
+    for sk, sec in drawn:
+        areas = [a / 100.0 for a in (sec.get('areas_mm2') or [])]
+        cand, _ = _material_profiles(sk, areas)
+        if not cand:
+            raise RuntimeError('%s has no closed profile' % sk.name)
+        profs.append(max(cand, key=lambda p: p.areaProperties().area))
+    lofts = root.features.loftFeatures
+
+    def attempt(rails):
+        li = lofts.createInput(adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+        for p in profs:
+            li.loftSections.add(p)
+        for c in rails:
+            li.centerLineOrRails.addRail(c)
+        li.isSolid = True
+        return lofts.add(li)
+
+    why = None
+    if rail_curves:
+        try:
+            attempt(rail_curves)
+            return 'with %d rail(s)' % len(rail_curves)
+        except Exception:
+            why = traceback.format_exc().strip().splitlines()[-1]
+    attempt([])
+    return 'without rails (%s)' % why if why else 'without rails'
+
+
+def _rails_and_loft(root, drawn, notes):
+    \"\"\"After the section sketches: draw RAILS, then (LOFT) the loft.\"\"\"
+    curves = draw_rails(root, notes)
+    done = [c for r, c in curves if r['complete']]
+    part = [r for r in RAILS if not r['complete']]
+    s = 'Rails: %d drawn, %d complete' % (len(curves), len(done))
+    if part:
+        s += '; not touching every profile (not used by a loft): ' + '; '.join(
+            '%s (%s)' % (r['name'], r['note']) for r in part[:3]) + (' ...' if len(part) > 3 else '')
+    notes.append(s)
+    if not LOFT:
+        return
+    if len(drawn) < 2:
+        notes.append('Loft skipped: it needs at least two section sketches')
+    elif len(drawn) > LOFT_MAX:
+        notes.append('Loft skipped: %d sections is more than %d; use a bigger spacing for the loft'
+                     % (len(drawn), LOFT_MAX))
+    elif any(not sec['loops'] for sk, sec in drawn):
+        notes.append('Loft skipped: a section has no closed outline')
+    else:
+        try:
+            notes.insert(0, 'Loft: one new body ' + _loft_with_rails(root, drawn, done))
+        except Exception:
+            why = traceback.format_exc().strip().splitlines()[-1]
+            notes.insert(0, 'WARNING: Fusion refused the loft (%s); the sketches and rails are kept' % why)
+
+_DRAWN = []
+"""
+
+_RAILS_HOOKS = (
+    ('            made += 1\n            if sec.get(\'extrude_mm\'):',
+     '            made += 1\n            _DRAWN.append((sk, sec))\n            if sec.get(\'extrude_mm\'):'),
+    ('        prog.hide()\n        msg = ',
+     '        prog.hide()\n        if not cancelled:\n            _rails_and_loft(root, _DRAWN, notes)\n        msg = '),
+)
+
+
 def _xray_round(x, nd=4):
     """Plain lists / dicts of rounded floats for embedding in the script."""
     if isinstance(x, dict):
@@ -1044,7 +1148,7 @@ def _xray_round(x, nd=4):
     return x
 
 
-def emit_fusion_xray_script(sections, title='X-Ray', notes=(), tidy=False):
+def emit_fusion_xray_script(sections, title='X-Ray', notes=(), tidy=False, rails=(), loft=False):
     """Fusion script for a stack of section sketches, the way the add-in
     does it: the sections are embedded once as data and a small loop draws
     them (one construction plane + one sketch each, curves drawn with
@@ -1061,7 +1165,13 @@ def emit_fusion_xray_script(sections, title='X-Ray', notes=(), tidy=False):
     With `tidy` (the sections traced with tidy corners) each loop is drawn
     through shared sketch points with tangent constraints where the data
     marks them (`_XRAY_TIDY_RUNTIME`); without it the script is exactly
-    the plain one."""
+    the plain one. `rails` (stl_to_solid.rails.trace_rails dicts, each with a
+    'name') are drawn as fitted splines on their own planes after the
+    sections, and with `loft` one new body is lofted through the sections
+    along the complete rails (without them if Fusion refuses; the sketches
+    stay either way). With rails every number is written at 6 decimals,
+    so the rails still touch the profiles."""
+    nd = 6 if rails else 4
     data = []
     for i, sec in enumerate(sections):
         data.append(_xray_round({
@@ -1071,7 +1181,7 @@ def emit_fusion_xray_script(sections, title='X-Ray', notes=(), tidy=False):
             'open': list(sec.get('open', [])),
             'areas_mm2': list(sec.get('areas_mm2') or []),
             'extrude_mm': sec.get('extrude_mm'),
-        }))
+        }, nd))
     L = [
         '"""Generated by stlToSolid — X-Ray: a stack of mesh section sketches (like',
         'Create Mesh Section Sketch + Fit Curves to Mesh Section for every slice at',
@@ -1091,9 +1201,25 @@ def emit_fusion_xray_script(sections, title='X-Ray', notes=(), tidy=False):
     ]
     L += [f'    {e!r},' for e in data]
     L += [']', '', '']
+    if rails:
+        L += ['# rails: fitted splines through the 90-degree cuts, crossings pinned onto',
+              '# the profiles; complete = touches every profile (only those guide a loft)',
+              'RAILS = [']
+        L += ['    %r,' % _xray_round({'name': r.get('name', 'rail %d' % (i + 1)), 'plane': r['plane'],
+                                     'pts': r['pts'], 'complete': bool(r['complete']),
+                                     'note': r.get('note', '')}, 6)
+              for i, r in enumerate(rails)]
+        L += [']', f'LOFT = {bool(loft)!r}', '', '']
     base = emit_fusion_script([])
     L.append(base[base.index('def _plane('):base.index('def _pick(')].rstrip('\n'))
-    L.append(_XRAY_RUNTIME)
+    runtime = _XRAY_RUNTIME
+    if rails:
+        for old, new in _RAILS_HOOKS:
+            assert runtime.count(old) == 1, old
+            runtime = runtime.replace(old, new)
+    L.append(runtime)
     if tidy:
         L.append(_XRAY_TIDY_RUNTIME)
+    if rails:
+        L.append(_XRAY_RAILS_RUNTIME)
     return '\n'.join(L)

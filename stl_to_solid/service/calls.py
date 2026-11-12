@@ -96,7 +96,8 @@ def xray_script(in_path, out_path, params):
                join=params.get('join', 2.5), outline=params.get('outline', False),
                trim=params.get('trim', 0.0), extrude=params.get('extrude', False),
                budget_s=params.get('budget_s'), tidy=params.get('tidy', False),
-               sharpen=params.get('sharpen', 0.0))
+               sharpen=params.get('sharpen', 0.0), rails=params.get('rails', False),
+               loft=params.get('rails', False) and params.get('loft', False))
     with open(out_path, 'w', encoding='utf-8') as f:
         f.write(s.pop('text'))
     return sanitize(s)

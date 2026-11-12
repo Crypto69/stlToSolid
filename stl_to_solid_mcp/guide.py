@@ -40,6 +40,7 @@ WHICH_TOOL = """# Which stlToSolid tool to use
 | `slice_join` / `join` | 2.5 mm | Join loose section ends closer than this |
 | `slice_trim` / `trim` | 0 mm | Cut slivers thinner than this out of sections |
 | `tidy` | off | Sections: re-solve corners as tangent fillets and exact corners; X-Ray scripts add tangent constraints |
+| `rails` / `loft` | off | X-Ray scripts: two 90-degree sections as loft rails pinned onto the profiles; with loft, one lofted body (best effort) |
 | `sharpen` | 0 mm | Sections: rounds that stay within this of their corner become sharp corners (0.08 is Fusion's Fit Curves feel) |
 
 ## Reading the report

@@ -34,6 +34,19 @@ watch(() => [store.xrayFrom, store.xrayTo, store.xraySpacing, store.resolvedSlic
       }, { immediate: true })
 onBeforeUnmount(() => { clearTimeout(traceTimer); store.stopXray() })
 
+// the rails' preview cut follows the stack's ends (no fitting: cheap)
+let railTimer = null
+watch(() => [store.xrayRails, store.xrayFrom, store.xrayTo, store.resolvedSliceAxis, store.params.units,
+             store.params.scale, store.jobId],
+      () => {
+        clearTimeout(railTimer)
+        railTimer = setTimeout(() => store.fetchRails(), 350)
+      }, { immediate: true })
+onBeforeUnmount(() => clearTimeout(railTimer))
+// Fusion's loft with hundreds of profiles is impractical: the script
+// skips it past this many sections
+const LOFT_MAX = 60
+
 const single = computed(() => store.xrayFrom === store.xrayTo)
 const axisName = computed(() => (store.resolvedSliceAxis || '').toUpperCase())
 const range = computed(() => {
@@ -127,12 +140,32 @@ async function download() {
       </p>
       <SlicePlaneOptions :tol="true" />
       <label class="check">
-        <input type="checkbox" v-model="store.xrayExtrude" :disabled="store.xrayCount < 2" />
+        <input type="checkbox" v-model="store.xrayExtrude"
+               :disabled="store.xrayCount < 2 || (store.xrayRails && store.xrayLoft)" />
         <span>
           Extrude each slice to the next (solid slabs)
           <span class="help">Every sketch is extruded up to the next plane and joined to the slab before it, so the stack comes out as one stepped solid Fusion builds without fail, where a Loft between two complex profiles folds over (a feature that starts mid-stack is its own body until a slab joins it). A hole along the axis stays open as long as its loop is drawn; Outline only leaves hole loops out, so it fills them. The last slab stops at the part's face. Needs at least two slices.</span>
         </span>
       </label>
+      <label class="check">
+        <input type="checkbox" v-model="store.xrayRails" :disabled="store.xrayCount < 2" />
+        <span>
+          Add 2 rails (90° sections)
+          <span class="help">Two cuts along the stack through the part's centre (cyan in the view), drawn in Fusion as splines on their own planes. Where a rail crosses a slice it is moved onto that slice's fitted outline, so it touches every profile exactly, which a Fusion Loft needs. A rail that misses a slice is drawn but not used by a loft. Holes are ignored.</span>
+        </span>
+      </label>
+      <p v-if="store.xrayRails && store.xrayRailsError" class="hint warn">Could not cut the rails: {{ store.xrayRailsError }}</p>
+      <label v-if="store.xrayRails" class="check">
+        <input type="checkbox" v-model="store.xrayLoft" :disabled="store.xrayCount < 2 || store.xrayExtrude" />
+        <span>
+          Loft profiles + rails (new body)
+          <span class="help">After the sketches, the script lofts one new body through every slice's outline along the rails. Best effort: if Fusion refuses the rails it tries without them, and if it refuses the loft the sketches and rails stay and the closing message says why. Not with Extrude each slice.</span>
+        </span>
+      </label>
+      <p v-if="store.xrayRails && store.xrayLoft && store.xrayCount > LOFT_MAX" class="hint warn">
+        {{ store.xrayCount }} slices is more than {{ LOFT_MAX }} for a loft: the script will skip
+        it. Use a bigger spacing for the loft.
+      </p>
       <p v-if="store.xrayBusy" class="hint">
         <template v-if="single">tracing the plane…</template>
         <template v-else>
