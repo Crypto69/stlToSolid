@@ -415,7 +415,9 @@ decimals when there are rails, so they still touch after rounding.
 - A rail is *complete* when it crosses every slice once, close to its
   outline. Others (a slot wall, a rail that misses a slice) are drawn but no
   loft uses them. The closing message lists them.
-- Holes are ignored: the rails and the loft follow the outer outline.
+- Holes are ignored: the rails and the loft follow the outer outline. On a
+  hollow part the cuts along the inner walls are drawn too, but marked as not
+  touching every slice.
 - The loft is best effort. If Fusion refuses the rails it tries without
   them. If it refuses the loft too, the sketches and rails stay and the
   message says why. It is skipped past 60 slices: use a bigger spacing for

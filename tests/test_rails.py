@@ -318,7 +318,7 @@ def test_xray_service_script_with_rails(obround, tmp_path):
     assert s['rails'] == {'count': 8, 'complete': 4}
     assert s['name'].endswith('_loft.py') and "'extrude_mm': None" in s['text']
     assert s['text'].count("'complete': True") == 4 and 'LOFT = True' in s['text']
-    assert any('8 rails, 4 touching every profile' in n for n in s['notes'])
+    assert any('8 rails traced, 4 touching every profile' in n for n in s['notes'])
     plain = xray.script(p, 'z', -3.5, 3.5, 2.0, offs)
     assert 'RAILS' not in plain['text'] and 'rails' in plain and plain['rails']['count'] == 0
     prev = xray.rails_preview(p, 'z', -3.5, 3.5)
@@ -368,3 +368,76 @@ def test_mcp_xray_script_with_rails(obround, tmp_path):
     assert r['rails'] == {'count': 8, 'complete': 4} and r['script'].endswith('_loft.py')
     with open(r['script']) as f:
         assert 'RAILS = [' in f.read()
+
+
+# --- review 2026-11-12 ---------------------------------------------------------
+
+def _tube(r_out, r_in, h=8.0, n=96):
+    """A closed tube (annulus extruded) as a mesh, along Z."""
+    return trimesh.creation.annulus(r_min=r_in, r_max=r_out, height=h, sections=n)
+
+
+def test_inner_skin_rails_are_never_complete():
+    """A thin tube wall (r 10 / 9.85): the rails along the inner skin must
+    not be pinned onto the outer outline (only the 4 outer ones complete),
+    and none of a complete rail's points dips to the inner skin."""
+    from stl_to_solid.rails import trace_rails
+    m = _tube(10.0, 9.85)
+    for tol in (0.08, 1.0):
+        secs = _stack(m, np.linspace(-3, 3, 5), tol=tol)
+        rails = trace_rails(m.vertices, m.faces, [0, 0, 1], [0, 0, 0], secs, tol=tol)
+        done = [r for r in rails if r['complete']]
+        assert len(done) == 4, (tol, [r['note'] for r in rails])
+        for r in done:
+            radii = np.linalg.norm(np.asarray(r['pts'])[:, :2], axis=1)
+            assert radii.min() > 9.9
+
+
+def test_descending_stack_keeps_the_rail_points():
+    """A stack running down the axis (the add-in's Stack '-'): the rails
+    are the same as for the same planes going up."""
+    from stl_to_solid.rails import trace_rails
+    s = trimesh.creation.icosphere(subdivisions=4, radius=10.0)
+    up = _stack(s, [-8.0, 0.0, 8.0])
+    down = _stack(s, [8.0, 0.0, -8.0])
+    ru = trace_rails(s.vertices, s.faces, [0, 0, 1], [0, 0, 0], up)
+    rd = trace_rails(s.vertices, s.faces, [0, 0, 1], [0, 0, 0], down)
+    assert [r['complete'] for r in rd] == [r['complete'] for r in ru] and all(r['complete'] for r in ru)
+    for a, b in zip(ru, rd):
+        assert len(a['pts']) == len(b['pts']) > 3
+        assert np.allclose(a['pts'], b['pts'])
+
+
+def test_spline_crossing_near_a_fit_point_moves_it():
+    """A crossing a hair from a fit point moves that point (no 1e-6 mm
+    segment, which kinks the fitted spline); a spline's end stays."""
+    from stl_to_solid.rails import _spline_hits
+    p = {'type': 'spline', 'pts': np.array([[0.0, 0.0], [1.0, 0.0004], [2.0, 0.0], [3.0, 1.0]])}
+    hits = _spline_hits(p, 1.0, 0.0, 1.0002, merge=1e-3)      # the line x = 1.0002
+    assert len(p['pts']) == 4 and np.allclose(hits[0], p['pts'][1]) and abs(p['pts'][1][0] - 1.0002) < 1e-12
+    hits = _spline_hits(p, 1.0, 0.0, 0.0003, merge=1e-3)      # near the start: the start itself
+    assert np.array_equal(hits[0], [0.0, 0.0]) and np.array_equal(p['pts'][0], [0.0, 0.0])
+    seg = np.linalg.norm(np.diff(p['pts'], axis=0), axis=1)
+    assert seg.min() > 0.5
+
+
+def test_loft_without_any_rail_still_lofts(tmp_path):
+    """Rails + loft where neither rail plane meets the part: the script
+    still has the loft step (it lofts without rails)."""
+    from stl_to_solid.service import xray
+    legs = trimesh.util.concatenate([trimesh.creation.box([2, 2, 10]).apply_translation([x, y, 0])
+                                     for x in (-6, 6) for y in (-6, 6)])
+    p = str(tmp_path / 'legs.stl')
+    legs.export(p)
+    s = xray.script(p, 'z', -4, 4, 4.0, [-4.0, 0.0, 4.0], rails=True, loft=True)
+    assert s['rails']['count'] == 0
+    assert 'RAILS = [' in s['text'] and 'LOFT = True' in s['text'] and '_rails_and_loft(root, _DRAWN' in s['text']
+
+
+def test_rail_notes_use_the_scripts_section_numbers(tmp_path):
+    from stl_to_solid.rails import trace_rails
+    m = _tube(10.0, 9.85)
+    secs = _stack(m, [-3.0, 0.0, 3.0])
+    rails = trace_rails(m.vertices, m.faces, [0, 0, 1], [0, 0, 0], secs, labels=[2, 4, 6])
+    notes = ' '.join(r['note'] for r in rails)
+    assert 'section 2' in notes and 'section 1:' not in notes

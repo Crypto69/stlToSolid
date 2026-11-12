@@ -117,10 +117,11 @@ def script(path, axis, frm, to, step, offsets, tol=0.08, units='mm', scale=1.0, 
         r['name'] = f'rail {i + 1}/{len(rail_list)}'
     if rails:
         k = sum(1 for r in rail_list if r['complete'])
-        notes.append(f"{len(rail_list)} rail{'s' if len(rail_list) != 1 else ''}, {k} touching every "
-                     "profile" + ('' if k else ': no rail reaches every section, so a loft runs without'))
-    text = emit_fusion_xray_script(sections, title=title, notes=notes, tidy=tidy, rails=rail_list,
-                                   loft=loft)
+        notes.append(f"{len(rail_list)} rail{'s' if len(rail_list) != 1 else ''} traced, {k} touching "
+                     "every profile" + ('' if k else ': no rail reaches every section, so a loft runs '
+                                         'without rails'))
+    text = emit_fusion_xray_script(sections, title=title, notes=notes, tidy=tidy,
+                                   rails=rail_list if rails else None, loft=loft)
     suffix = '_loft' if loft and n > 1 else ('_solid' if extrude and n > 1 else '')
     return {'text': text, 'name': f'_xray_{axis}{lo:+.1f}_{hi:+.1f}_s{step:g}{suffix}.py',
             'slices': n, 'notes': notes,

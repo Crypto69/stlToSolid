@@ -137,7 +137,9 @@ def rails_for(path, axis, secs2d, tol=0.08, units='mm', scale=1.0, count=2):
     n = np.zeros(3)
     n[k] = 1.0
     live = [s for s in secs2d if s['loops']]
-    return trace_rails(m.vertices, m.faces, n, m.bounding_box.centroid, live, tol=tol, count=count)
+    labels = [i + 1 for i, s in enumerate(secs2d) if s['loops']]       # the script's k/N
+    return trace_rails(m.vertices, m.faces, n, m.bounding_box.centroid, live, tol=tol, count=count,
+                       labels=labels)
 
 
 def rails_preview(path, axis, frm_at, to_at, units='mm', scale=1.0, count=2):

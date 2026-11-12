@@ -1129,7 +1129,14 @@ _RAILS_HOOKS = (
     ('            made += 1\n            if sec.get(\'extrude_mm\'):',
      '            made += 1\n            _DRAWN.append((sk, sec))\n            if sec.get(\'extrude_mm\'):'),
     ('        prog.hide()\n        msg = ',
-     '        prog.hide()\n        if not cancelled:\n            _rails_and_loft(root, _DRAWN, notes)\n        msg = '),
+     '        prog.hide()\n        if not cancelled:\n            try:\n'
+     '                _rails_and_loft(root, _DRAWN, notes)\n'
+     '            except Exception:\n'
+     '                notes.insert(0, \'WARNING: the rails failed: %s\' % '
+     'traceback.format_exc().strip().splitlines()[-1])\n        msg = '),
+    ('        for i, sec in enumerate(SECTIONS):\n',
+     '        del _DRAWN[:]                                 # a second run starts afresh\n'
+     '        for i, sec in enumerate(SECTIONS):\n'),
 )
 
 
@@ -1148,7 +1155,7 @@ def _xray_round(x, nd=4):
     return x
 
 
-def emit_fusion_xray_script(sections, title='X-Ray', notes=(), tidy=False, rails=(), loft=False):
+def emit_fusion_xray_script(sections, title='X-Ray', notes=(), tidy=False, rails=None, loft=False):
     """Fusion script for a stack of section sketches, the way the add-in
     does it: the sections are embedded once as data and a small loop draws
     them (one construction plane + one sketch each, curves drawn with
@@ -1165,13 +1172,13 @@ def emit_fusion_xray_script(sections, title='X-Ray', notes=(), tidy=False, rails
     With `tidy` (the sections traced with tidy corners) each loop is drawn
     through shared sketch points with tangent constraints where the data
     marks them (`_XRAY_TIDY_RUNTIME`); without it the script is exactly
-    the plain one. `rails` (stl_to_solid.rails.trace_rails dicts, each with a
-    'name') are drawn as fitted splines on their own planes after the
+    the plain one. `rails` (None = off; else a list, maybe empty, of
+    stl_to_solid.rails.trace_rails dicts, each with a 'name') are drawn as fitted splines on their own planes after the
     sections, and with `loft` one new body is lofted through the sections
     along the complete rails (without them if Fusion refuses; the sketches
     stay either way). With rails every number is written at 6 decimals,
     so the rails still touch the profiles."""
-    nd = 6 if rails else 4
+    nd = 6 if rails is not None else 4
     data = []
     for i, sec in enumerate(sections):
         data.append(_xray_round({
@@ -1201,7 +1208,7 @@ def emit_fusion_xray_script(sections, title='X-Ray', notes=(), tidy=False, rails
     ]
     L += [f'    {e!r},' for e in data]
     L += [']', '', '']
-    if rails:
+    if rails is not None:
         L += ['# rails: fitted splines through the 90-degree cuts, crossings pinned onto',
               '# the profiles; complete = touches every profile (only those guide a loft)',
               'RAILS = [']
@@ -1213,13 +1220,13 @@ def emit_fusion_xray_script(sections, title='X-Ray', notes=(), tidy=False, rails
     base = emit_fusion_script([])
     L.append(base[base.index('def _plane('):base.index('def _pick(')].rstrip('\n'))
     runtime = _XRAY_RUNTIME
-    if rails:
+    if rails is not None:
         for old, new in _RAILS_HOOKS:
             assert runtime.count(old) == 1, old
             runtime = runtime.replace(old, new)
     L.append(runtime)
     if tidy:
         L.append(_XRAY_TIDY_RUNTIME)
-    if rails:
+    if rails is not None:
         L.append(_XRAY_RAILS_RUNTIME)
     return '\n'.join(L)

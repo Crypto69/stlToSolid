@@ -89,13 +89,16 @@ def _line_hits(p0, p1, a, b, k):
     return [np.asarray(p0, float) + t * (np.asarray(p1, float) - np.asarray(p0, float))]
 
 
-def rail_crossings(sec2d, rail_origin, rail_normal):
+def rail_crossings(sec2d, rail_origin, rail_normal, tol=0.08):
     """Where the rail plane (rail_origin, rail_normal) crosses the fitted
     outer loops of one traced section (section_fit.fit_section's result,
     2-D primitives): returns a list of 3-D points (mm) that lie on the
     drawn profile curves by construction. A crossing inside a spline is
     inserted into that spline's fit points (`pts`, in place), so the
-    spline Fusion fits passes through it. Holes are left out."""
+    spline Fusion fits passes through it; within max(1e-3, tol/10) of an
+    existing fit point, that point is moved onto the crossing instead (a
+    second point a hair away kinks the fitted spline), and near a spline's
+    end the crossing is the end itself. Holes are left out."""
     o = np.asarray(sec2d['origin'], float)
     u = np.asarray(sec2d['u'], float)
     v = np.asarray(sec2d['v'], float)
@@ -115,7 +118,7 @@ def rail_crossings(sec2d, rail_origin, rail_normal):
             elif p['type'] == 'arc':
                 hits += _drawn_arc_hits(p, a, b, k)
             else:
-                hits += _spline_hits(p, a, b, k)
+                hits += _spline_hits(p, a, b, k, max(1e-3, tol / 10.0))
     # a crossing at a junction is found on both curves
     out = []
     for q in hits:
@@ -145,9 +148,11 @@ def _drawn_arc_hits(p, a, b, k):
             if _arc_contains(drawn, math.atan2(q[1] - c[1], q[0] - c[0]))]
 
 
-def _spline_hits(p, a, b, k):
-    pts = np.asarray(p['pts'], float)
-    ring = np.vstack([pts, pts[:1]]) if p.get('closed') else pts
+def _spline_hits(p, a, b, k, merge=1e-3):
+    pts = np.asarray(p['pts'], float).copy()
+    closed = bool(p.get('closed'))
+    n = len(pts)
+    ring = np.vstack([pts, pts[:1]]) if closed else pts
     f = ring @ np.array([a, b]) - k
     hits, inserts = [], []
     for i in range(len(ring) - 1):
@@ -158,16 +163,23 @@ def _spline_hits(p, a, b, k):
             continue
         t = f[i] / (f[i] - f[i + 1])
         q = ring[i] + t * (ring[i + 1] - ring[i])
+        near = i if np.linalg.norm(q - ring[i]) <= np.linalg.norm(q - ring[i + 1]) else i + 1
+        if np.linalg.norm(q - ring[near]) <= merge:
+            j = near % n
+            if not closed and j in (0, n - 1):
+                hits.append(pts[j].copy())         # a spline end is a junction: on the curve
+            else:
+                pts[j] = q                         # move the fit point onto the crossing
+                hits.append(q)
+            continue
         hits.append(q)
-        if (np.linalg.norm(q - ring[i]) > 1e-7 and np.linalg.norm(q - ring[i + 1]) > 1e-7):
-            inserts.append((i + 1, q))
-    if not p.get('closed') and len(f) and f[-1] == 0:
+        inserts.append((i + 1, q))
+    if not closed and len(f) and f[-1] == 0:
         hits.append(ring[-1].copy())
-    if inserts:
-        new = list(pts)
-        for at, q in reversed(inserts):
-            new.insert(at, q)                      # at == len(pts) is the closing edge: append
-        p['pts'] = np.asarray(new, float)
+    new = list(pts)
+    for at, q in reversed(inserts):
+        new.insert(at, q)                          # at == len(pts) is the closing edge: append
+    p['pts'] = np.asarray(new, float)
     return hits
 
 
@@ -285,7 +297,7 @@ def _at(P, x):
     return P[i] + t * (P[i + 1] - P[i])
 
 
-def trace_rails(V, F, axis_normal, centre, secs2d, tol=0.08, count=2):
+def trace_rails(V, F, axis_normal, centre, secs2d, tol=0.08, count=2, labels=None):
     """Rails for a stack of traced sections `secs2d` (fit_section results,
     in stack order, every one square to `axis_normal`).
 
@@ -299,7 +311,12 @@ def trace_rails(V, F, axis_normal, centre, secs2d, tol=0.08, count=2):
     profiles' crossings. Anything else comes back with complete False and
     a note (drawn, but no loft should use it). A cut that turns back along
     the axis (a shell's outer and inner skin) is split there into one rail
-    each way; pieces that do not reach two profile planes are dropped.
+    each way; pieces that do not reach two profile planes are dropped. A
+    rail point must also lie on the section's own raw outer loop (within
+    tol/4, and nearer it than any hole): a rail along a thin wall's inner
+    skin is never pinned onto the outer outline. The stack may run either
+    way along the axis. `labels` (one per section) name the sections in the
+    notes (default 1, 2, ...).
 
     Returns [{'plane': {'origin', 'normal'}, 'pts': [[x, y, z]...],
     'complete': bool, 'crossings': [[profile index, [x, y, z]]...],
@@ -319,7 +336,7 @@ def trace_rails(V, F, axis_normal, centre, secs2d, tol=0.08, count=2):
     back = max(10.0 * tol, 0.25 * float(gaps.min())) if len(gaps) else 10.0 * tol
     rails = []
     for ro, rm in rail_planes(n_hat, centre, count):
-        prof_x = [rail_crossings(s, ro, rm) for s in secs2d]
+        prof_x = [rail_crossings(s, ro, rm, tol) for s in secs2d]
         P, S = cut_segments(V, F, ro, rm)
         for idx, closed in chain_loops(S):
             Q = P[idx]
@@ -337,27 +354,55 @@ def trace_rails(V, F, axis_normal, centre, secs2d, tol=0.08, count=2):
                 # a piece between two neighbouring profile planes is no rail
                 if sum(1 for hk in heights if h.min() - _EPS <= hk <= h.max() + _EPS) < 2:
                     continue
-                rails.append(_one_rail(piece, h, heights, prof_x, ro, rm, tol, snap))
+                rails.append(_one_rail(piece, h, heights, prof_x, ro, rm, tol, snap, secs2d,
+                                       labels))
     return rails
 
 
-def _one_rail(piece, h, heights, prof_x, ro, rm, tol, snap):
+def _on_outer_skin(raw, sec2d, tol):
+    """True when the 3-D rail point `raw` lies on one of the section's own
+    raw outer loops (within tol/4) and no nearer a hole's."""
+    loops = sec2d.get('raw')
+    if loops is None:
+        return True
+    from .section_fit import _point_poly_dists
+    o, u, v = (np.asarray(sec2d[key], float) for key in ('origin', 'u', 'v'))
+    q = np.asarray(raw, float) - o
+    xy = np.array([[q @ u, q @ v]])
+
+    def dist(loop):
+        loop = np.asarray(loop, float)
+        if len(loop) < 2:
+            return math.inf
+        return float(_point_poly_dists(xy, np.vstack([loop, loop[:1]]))[0])
+    d_out = min((dist(outer) for outer, _ in loops), default=math.inf)
+    d_hole = min((dist(hl) for _, holes in loops for hl in holes), default=math.inf)
+    return d_out <= max(tol / 4.0, 1e-6) and d_out <= d_hole
+
+
+def _one_rail(piece, h, heights, prof_x, ro, rm, tol, snap, secs2d=None, labels=None):
     plane = {'origin': np.asarray(ro, float).tolist(), 'normal': np.asarray(rm, float).tolist()}
     notes, where, crossings = [], [], []
+
+    def name(k):
+        return 'section %s' % (labels[k] if labels is not None else k + 1)
     for k, hk in enumerate(heights):
         xs = _crossings_at(h, hk)
         if len(xs) != 1:
-            notes.append('section %d: %s' % (k + 1, 'missed' if not xs else 'crossed %d times' % len(xs)))
+            notes.append('%s: %s' % (name(k), 'missed' if not xs else 'crossed %d times' % len(xs)))
             continue
         raw = _at(piece, xs[0])
         cands = prof_x[k]
         if not cands:
-            notes.append('section %d: its outline does not reach the rail plane' % (k + 1))
+            notes.append('%s: its outline does not reach the rail plane' % name(k))
+            continue
+        if secs2d is not None and not _on_outer_skin(raw, secs2d[k], tol):
+            notes.append('%s: the rail runs on an inner wall or a hole there' % name(k))
             continue
         d = [float(np.linalg.norm(raw - c)) for c in cands]
         j = int(np.argmin(d))
         if d[j] > snap:
-            notes.append('section %d: the outline is %.2f mm from the rail' % (k + 1, d[j]))
+            notes.append('%s: the outline is %.2f mm from the rail' % (name(k), d[j]))
             continue
         where.append(xs[0])
         crossings.append([k, np.asarray(cands[j], float)])
@@ -367,6 +412,10 @@ def _one_rail(piece, h, heights, prof_x, ro, rm, tol, snap):
         return {'plane': plane, 'pts': pts.tolist(), 'complete': False,
                 'crossings': [[k, q.tolist()] for k, q in crossings],
                 'note': '; '.join(notes[:4]) + (' ...' if len(notes) > 4 else '')}
+    # along the piece (which runs up the axis; the stack may run down)
+    order = sorted(range(len(where)), key=lambda i: where[i])
+    where = [where[i] for i in order]
+    crossings = [crossings[i] for i in order]
     # stitch: crossing, thinned raw points, crossing, ... (the first and
     # last crossings are the rail's ends)
     out = [crossings[0][1]]
