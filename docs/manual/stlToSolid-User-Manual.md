@@ -374,7 +374,7 @@ same thing without a download.
 | **Trim slivers up to** | 0 mm | As in Sliced Loft. X-Ray keeps its own value, so a trim set for a leaky loft does not eat the thin walls of the next part. If slivers were trimmed anywhere in the stack, a note says in how many slices. |
 | **Outline only** | off | Just the outer outline of each slice: holes, islands and loose pieces are left out. About five times faster on organic shapes. |
 | **Tidy corners (tangent fillets, sharp creases)** | off | Fillets are solved to meet their walls tangent and corners meet exactly. In the Fusion script the curves of each loop share their end points and every fillet gets a tangent constraint, so the sketch behaves like one you drew. The summary says how many junctions are tangent. Off draws the plain fit. |
-| **Sharpen rounds below** | 0.08 mm | Shown with Tidy corners. A round between two walls that stays within this distance of their corner is drawn as the sharp corner, like Fusion's Fit Curves at the same tolerance. `0.08` turns rounds up to about 0.2 mm sharp. `0` keeps every round. The summary says how many were sharpened. |
+| **Sharpen rounds below** | 0.08 mm | Shown with Tidy corners. A round between two walls that stays within this distance of their corner is drawn as the sharp corner, like Fusion's Fit Curves at the same tolerance. `0.08` turns rounds up to about 0.25 mm sharp. `0` keeps every round. The summary says how many were sharpened. |
 
 ### 5.3 Settings: slabs and the download
 

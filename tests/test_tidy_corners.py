@@ -386,3 +386,49 @@ def test_mcp_tools_take_tidy(tmp_path):
     with open(xs.structured_content['script']) as f:
         assert 'draw_prims_tidy' in f.read()
     assert bad_err
+
+
+# --- review 2026-11-12 ---------------------------------------------------------
+
+@pytest.mark.parametrize('sharpen', [0.15, 0.5])
+def test_sharpen_above_tol_still_gives_sharp_corners(sharpen):
+    """A Sharpen value above the fit tolerance: the sharpened walls' points
+    sit further than tol from them by design; they must stay lines, not
+    turn the loop into one spline."""
+    from stl_to_solid.section_fit import fit_loop
+    st = {}
+    prims = fit_loop(_rounded_rect(20, 10, 0.3), tol=0.08, sharpen_mm=sharpen, stats=st)
+    assert _kinds(prims) == ['line'] * 4 and st['sharpened'] == 4
+
+
+@pytest.mark.parametrize('cfg', [{'tidy': True}, {'sharpen_mm': 0.08}, {'tidy': True, 'sharpen_mm': 0.08}])
+def test_noisy_open_chain_free_ends_stay(cfg):
+    from stl_to_solid.section_fit import fit_loop
+    rng = np.random.default_rng(3)
+    a = np.linspace([0, 0], [10, 0], 60, endpoint=False)
+    b = np.linspace([10, 0], [10, 10], 61)
+    xy = np.vstack([a, b]) + rng.normal(0, 0.02, (121, 2))
+    prims = fit_loop(xy, tol=0.08, closed=False, stats={}, **cfg)
+    s0 = prims[0]['pts'][0] if prims[0]['type'] == 'spline' else prims[0]['p0']
+    s1 = prims[-1]['pts'][-1] if prims[-1]['type'] == 'spline' else prims[-1]['p1']
+    assert np.array_equal(s0, xy[0]) and np.array_equal(s1, xy[-1])
+
+
+def test_tidy_never_worse_than_plain_by_more_than_a_tenth_of_tol():
+    """Random noisy outlines (rounded rects, notches, blobs): with tidy +
+    sharpen the worst miss is never more than max(plain, sharpen) + tol/10."""
+    from stl_to_solid.section_fit import _loop_dev, fit_loop
+    rng = np.random.default_rng(7)
+    for k in range(12):
+        tol = [0.02, 0.05, 0.08][k % 3]
+        r = rng.uniform(0.05, 2.0)
+        xy = _rounded_rect(rng.uniform(5, 30), rng.uniform(3, 15), r, noise=tol / 6, seed=k)
+        if k % 4 == 3:            # a blob
+            t = np.linspace(0, 2 * np.pi, 400, endpoint=False)
+            rr = 8 + 0.6 * np.sin(3 * t) + rng.normal(0, tol / 6, 400)
+            xy = np.c_[rr * np.cos(t), rr * np.sin(t)]
+        plain = fit_loop(xy, tol)
+        tidy = fit_loop(xy, tol, tidy=True, sharpen_mm=0.08, stats={})
+        if isinstance(plain, dict) or isinstance(tidy, dict):
+            continue
+        assert _loop_dev(xy, tidy, True) <= max(_loop_dev(xy, plain, True), 0.08) + 0.1 * tol + 1e-9

@@ -120,7 +120,7 @@ const trimWarn = computed(() => !!store.inputStats?.watertight && trim.value > 0
       <p class="hint">
         A round between two walls that stays within this of their corner
         is drawn as the sharp corner, like Fusion's Fit Curves at the same
-        tolerance. 0.08 turns rounds up to about 0.2 mm sharp; 0 keeps
+        tolerance. 0.08 turns rounds up to about 0.25 mm sharp; 0 keeps
         every round.
       </p>
     </template>

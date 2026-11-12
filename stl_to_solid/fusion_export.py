@@ -1021,7 +1021,7 @@ def _tidy_note(drawn):
     were added (the closing message prints NOTES).\"\"\"
     s = 'Tidy corners: %d tangent constraint(s) added' % drawn.get('tangent', 0)
     if drawn.get('tangent_failed'):
-        s += ', %d Fusion refused' % drawn['tangent_failed']
+        s += ', %d could not be added' % drawn['tangent_failed']
     if NOTES and NOTES[-1].startswith('Tidy corners:'):
         NOTES[-1] = s
     else:
