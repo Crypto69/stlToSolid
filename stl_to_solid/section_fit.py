@@ -1105,8 +1105,8 @@ def _pre_fillets(run, closed, max_deg, tol, check=None):
     up to 20 where the lines took the round's ends), and make an arc that
     meets one line within `max_deg` tangent to it. Each move is undone on
     its own when it takes those curves further from their raw points than
-    before + TIDY_SLACK*tol (measured by `check(group)`, default the
-    curves' own raw points)."""
+    max(tol, before + TIDY_SLACK*tol) (measured by `check(group)`, default
+    the curves' own raw points)."""
     from .profile_fit import _arc_tangent_at, _line_dir, _make_tangent, _solve_fillet
     n = len(run)
     cos_max = math.cos(math.radians(max_deg))
@@ -1142,7 +1142,7 @@ def _pre_fillets(run, closed, max_deg, tol, check=None):
             arc['p1'] = x.copy()
             nxt['p0'] = x.copy()
             moved = True
-        if moved and check(group) > dev0 + TIDY_SLACK * tol:
+        if moved and check(group) > max(dev0 + TIDY_SLACK * tol, tol):
             for q, sn in zip(group, snap):
                 _restore(q, sn)
             moved = False
@@ -1152,7 +1152,8 @@ def _pre_fillets(run, closed, max_deg, tol, check=None):
 
 
 TIDY_FILLET_DEG = 30.0
-# how much further from the raw points a tidy move may take the curves (x tol)
+# how much further from the raw points a tidy move may take curves that
+# already miss by more than tol (x tol); below tol, up to tol
 TIDY_SLACK = 0.25
 
 
@@ -1168,7 +1169,9 @@ def tidy_junctions(prims, tol, closed=True, stats=None, raw=None):
     chain. A run is put back as it was (stats['tidy_reverted']) when the
     solve moves an end point (or an arc's mid point) by more than
     max(0.5, 5*tol), reverses a line, or takes the drawn curves further
-    from the raw points than before + TIDY_SLACK*tol. `raw` (the loop's
+    from the raw points than max(tol, before + TIDY_SLACK*tol): tangency
+    may cost accuracy, but never past the fit tolerance (or a quarter of it
+    beyond a plain fit that was already outside it). `raw` (the loop's
     own section points) makes that check use every raw point near the
     moved curves against the curves near them; without it, the curves'
     own points. In place."""
@@ -1229,7 +1232,7 @@ def tidy_junctions(prims, tol, closed=True, stats=None, raw=None):
             p.pop('_pin_p0', None)
             p.pop('_pin_p1', None)
         bad = any(_drift(p, s) > limit for p, s in zip(run, snap))
-        if not bad and check(run, run_closed) > dev0 + TIDY_SLACK * tol:
+        if not bad and check(run, run_closed) > max(dev0 + TIDY_SLACK * tol, tol):
             bad = True
         if bad:
             for p, s in zip(run, snap):
@@ -1327,7 +1330,8 @@ def fit_loop(xy, tol=0.08, mesh_pts=None, min_prim_mm=None, min_run=3, tidy=Fals
     the Fusion drawing can constrain them. `stats` (a dict, optional)
     counts 'sharpened', 'tidy_reverted' and 'tangent'. The tidy result is
     dropped for the plain fit (counted in 'tidy_reverted') when it misses
-    the section by more than the plain fit does (or sharpen_mm) plus tol/10.
+    the section by more than tol (or sharpen_mm) and by more than the plain
+    fit does plus tol/10.
     `mesh_pts`
     (optional, 2-D) refines arc fits on nearby mesh vertices, as the
     prismatic engine does.
@@ -1377,9 +1381,9 @@ def fit_loop(xy, tol=0.08, mesh_pts=None, min_prim_mm=None, min_run=3, tidy=Fals
         min_prim_mm = max(0.6, 8.0 * tol)
     if not (tidy or sharpen_mm > 0):
         return _finish_loop(prims, pts, tol, min_prim_mm, min_run, closed)
-    # tidy corners, then the plain fit from the same segmentation: the tidy
-    # one is kept unless it misses the section by more than the plain one
-    # (or sharpen_mm, which it may by design) plus tol/10
+    # tidy corners; the plain fit from the same segmentation is the fallback
+    # when the tidy one misses the section by more than tol (or sharpen_mm,
+    # which it may by design) and more than the plain one plus tol/10
     plain_prims = [_prim_snapshot(p) for p in prims]
     local = {}
     if tidy:
@@ -1387,11 +1391,16 @@ def fit_loop(xy, tol=0.08, mesh_pts=None, min_prim_mm=None, min_run=3, tidy=Fals
     if sharpen_mm > 0:
         sharpen_corners(prims, sharpen_mm, tol, closed, local)
     out = _finish_loop(prims, pts, tol, min_prim_mm, min_run, closed, tidy=tidy, stats=local)
-    plain = _finish_loop(plain_prims, pts, tol, min_prim_mm, min_run, closed)
     sub = pts[::max(1, len(pts) // 1500)]
-    if _loop_dev(sub, out, closed) > max(_loop_dev(sub, plain, closed), sharpen_mm) + 0.1 * tol:
-        _bump(stats, 'tidy_reverted')
-        return plain
+    dev = _loop_dev(sub, out, closed) if not isinstance(out, dict) else 0.0
+    if dev > max(tol, sharpen_mm):
+        # outside the tolerance: compare with the plain fit (skipping its
+        # slow uncross pass first, which only ever redraws crossings)
+        quick = _finish_loop([_prim_snapshot(p) for p in plain_prims], pts, tol, min_prim_mm,
+                             min_run, closed, uncross=False)
+        if dev > max(_loop_dev(sub, quick, closed), sharpen_mm) + 0.1 * tol:
+            _bump(stats, 'tidy_reverted')
+            return _finish_loop(plain_prims, pts, tol, min_prim_mm, min_run, closed)
     for k, v in local.items():
         _bump(stats, k, v)
     return out
@@ -1402,7 +1411,7 @@ def _loop_dev(pts, prims, closed):
     return polyline_deviation(pts, poly) if closed else _open_polyline_dev(pts, poly)
 
 
-def _finish_loop(prims, pts, tol, min_prim_mm, min_run, closed, tidy=False, stats=None):
+def _finish_loop(prims, pts, tol, min_prim_mm, min_run, closed, tidy=False, stats=None, uncross=True):
     """fit_loop after segmentation: the spline fallback for runs the lines
     and arcs did not fit, (tidy) the junction solve, shared end points, no
     crossings, (tidy) the tangent flags."""
@@ -1422,7 +1431,9 @@ def _finish_loop(prims, pts, tol, min_prim_mm, min_run, closed, tidy=False, stat
     prims = _replace_with_splines(prims, runs, tol, closed)
     if tidy:
         tidy_junctions(prims, tol, closed, stats, raw=pts)
-    prims = _uncross(_close_junctions(prims, closed), tol, closed)
+    prims = _close_junctions(prims, closed)
+    if uncross:
+        prims = _uncross(prims, tol, closed)
     if tidy:
         _bump(stats, 'tangent', flag_tangents(prims, closed))
     return prims
