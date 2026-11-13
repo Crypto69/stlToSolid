@@ -23,6 +23,7 @@ const trim = computed({
 })
 const joinTouched = computed(() => join.value !== DEFAULT_PARAMS.slice_join)
 const trimTouched = computed(() => trim.value !== DEFAULT_PARAMS.slice_trim)
+const sharpenTouched = computed(() => store.xraySharpen !== 0.08)
 // a watertight mesh has no double skin: trimming it only cuts real walls
 const trimWarn = computed(() => !!store.inputStats?.watertight && trim.value > 0)
 </script>
@@ -96,4 +97,32 @@ const trimWarn = computed(() => !!store.inputStats?.watertight && trim.value > 0
       <span class="help">Draw just the outer outline: loose open pieces and inner loops (holes, islands) are left out, so the sketch is one clean profile to extrude. The summary still says how many were skipped.</span>
     </span>
   </label>
+  <template v-if="tol">
+    <label class="check">
+      <input type="checkbox" v-model="store.xrayTidy" />
+      <span>
+        Tidy corners (tangent fillets, sharp creases)
+        <span class="help">Fillets meet their walls tangent, corners meet exactly, and in Fusion the curves share their end points with tangent constraints on the fillets. Off draws the plain fit.</span>
+      </span>
+    </label>
+    <template v-if="store.xrayTidy">
+      <div class="row">
+        <label for="slice_sharpen">
+          Sharpen rounds below
+          <span class="unit num">mm</span>
+        </label>
+        <input
+          id="slice_sharpen" type="number" step="0.01" min="0" max="1"
+          v-model.number="store.xraySharpen"
+          :class="{ touched: sharpenTouched }"
+        />
+      </div>
+      <p class="hint">
+        A round between two walls that stays within this of their corner
+        is drawn as the sharp corner, like Fusion's Fit Curves at the same
+        tolerance. 0.08 turns rounds up to about 0.25 mm sharp; 0 keeps
+        every round.
+      </p>
+    </template>
+  </template>
 </template>

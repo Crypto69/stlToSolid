@@ -146,6 +146,35 @@ def emit_fusion_script(bodies_info, design_name='stlToSolid'):
         '    return out',
         '',
         '',
+        'def _fillet(root, pts_cm, r_cm):',
+        '    """Constant-radius fillet on the edges of the newest body that run',
+        '    through the given points (cm); the edges are found by distance, so the',
+        '    script does not depend on Fusion\'s edge order. Returns the feature."""',
+        '    body = root.bRepBodies.item(root.bRepBodies.count - 1)',
+        '    mm = adsk.core.Application.get().measureManager',
+        '    edges = adsk.core.ObjectCollection.create()',
+        '    for p in pts_cm:',
+        '        pt = adsk.core.Point3D.create(*p)',
+        '        best, bd = None, None',
+        '        for i in range(body.edges.count):',
+        '            e = body.edges.item(i)',
+        '            d = mm.measureMinimumDistance(e, pt).value',
+        '            if bd is None or d < bd:',
+        '                best, bd = e, d',
+        '        if best is not None and bd < 0.01:',
+        '            edges.add(best)',
+        '    if edges.count == 0:',
+        "        raise RuntimeError('fillet R%.3f mm: no edge found at %s' % (r_cm * 10, pts_cm[0]))",
+        '    feats = root.features.filletFeatures',
+        '    fi = feats.createInput()',
+        '    val = adsk.core.ValueInput.createByReal(r_cm)',
+        '    try:',
+        '        fi.edgeSetInputs.addConstantRadiusEdgeSet(edges, val, True)',
+        '    except AttributeError:',
+        '        fi.addConstantRadiusEdgeSet(edges, val, True)',
+        '    return feats.add(fi)',
+        '',
+        '',
         'def run(context):',
         '    ui = None',
         '    try:',
@@ -233,6 +262,11 @@ def emit_fusion_script(bodies_info, design_name='stlToSolid'):
             L.append(f"{ind}# cross-axis cone (countersink), half-angle {np.degrees(c['half_angle']):.1f} deg: "
                      f"add a Revolve cut or Hole feature manually; apex {np.round(c['apex'], 3).tolist()} mm, "
                      f"axis {np.round(c['axis'], 4).tolist()}, extent {c['h0']:.2f}..{c['h1']:.2f} mm from the apex")
+        for fi in info.get('fillets', []):
+            pts = [tuple(_cm(c) for c in p) for p in fi['edges']]
+            meas = ', '.join(f'{m:.4f}' for m in fi.get('r_measured', []))
+            L.append(f"{ind}# fillet R{fi['r']:g} mm on {len(pts)} edge(s) (measured {meas})")
+            L.append(f"{ind}_fillet(root, {pts}, {_cm(fi['r'])})")
         L.append(f"{ind}made_any = True")
     L += [
         f"{ind}if not made_any:",
@@ -736,6 +770,15 @@ def _track(feat, bodies, seen):
             bodies.append(b)
 
 
+def _area(pr):
+    \"\"\"A profile's area (cm2), or None when Fusion cannot measure it (a
+    zero-size scrap where a leaky outline touches itself).\"\"\"
+    try:
+        return pr.areaProperties().area
+    except Exception:
+        return None
+
+
 def _material_profiles(sketch, areas_cm2, rel=0.03):
     \"\"\"The profiles to extrude. Fusion lists a hole's interior as a
     profile as well as the ring around it; extruding both fills the hole.
@@ -745,12 +788,13 @@ def _material_profiles(sketch, areas_cm2, rel=0.03):
     matching (a fit that went wrong), every profile is taken and matched
     is False so the run can say so.\"\"\"
     profs = [sketch.profiles.item(i) for i in range(sketch.profiles.count)]
+    profs = [pr for pr in profs if _area(pr) is not None] or profs     # drop scraps
     if not areas_cm2:
         return profs, True
     out = []
     for pr in profs:
-        a = pr.areaProperties().area
-        if any(abs(a - e) <= rel * max(e, 1e-9) for e in areas_cm2):
+        a = _area(pr)
+        if a is not None and any(abs(a - e) <= rel * max(e, 1e-9) for e in areas_cm2):
             out.append(pr)
     if out:
         return out, True
@@ -872,6 +916,240 @@ def run(context):
 """
 
 
+# the drawing code with tidy corners: one copy here (embedded in the
+# X-Ray script only when tidy is on, so the default script is unchanged),
+# a textual copy in the Mesh to Outline add-in (desktop parity test)
+_DRAW_TIDY = """
+def _nearest_end(curve, target):
+    \"\"\"The end sketch point of `curve` nearest `target` (sketch space).
+    Fusion keeps an arc counter-clockwise, so a clockwise arc's
+    startSketchPoint is where it was asked to end.\"\"\"
+    a, b = curve.startSketchPoint, curve.endSketchPoint
+    return a if a.geometry.distanceTo(target) <= b.geometry.distanceTo(target) else b
+
+
+def draw_prims_tidy(sketch, prims, notes=None):
+    \"\"\"Tidy-corners twin of draw_prims: the curves of one loop or open
+    chain are chained through shared sketch points (each curve starts on
+    the previous curve's end point, a loop's last curve ends on the first
+    curve's start point), so Fusion sees them connected, and every
+    junction the section data marks tangent ('tan1' on a curve, 'tan0' on
+    the next) gets a tangent constraint. A curve Fusion refuses on shared
+    points is drawn from plain points instead, with draw_prims's
+    fallbacks. `notes` also counts 'tangent' (constraints added) and
+    'tangent_failed'. Returns the curve count.\"\"\"
+    notes = {} if notes is None else notes
+    if isinstance(prims, dict) or len(prims) < 2:
+        return draw_prims(sketch, prims, notes)
+    curves = sketch.sketchCurves
+
+    def P(p):
+        return sketch.modelToSketchSpace(
+            adsk.core.Point3D.create(p[0] / 10.0, p[1] / 10.0, p[2] / 10.0))
+
+    def ends(p):
+        if p['type'] == 'spline':
+            return p['pts'][0], p['pts'][-1]
+        return p['p0'], p['p1']
+
+    def bump(key):
+        notes[key] = notes.get(key, 0) + 1
+
+    a0, z1 = ends(prims[0])[0], ends(prims[-1])[1]
+    closed = sum((x - y) ** 2 for x, y in zip(a0, z1)) < 1e-12
+    first, prev_end, made, n = None, None, [], 0
+    for k, p in enumerate(prims):
+        q0, q1 = ends(p)
+        start = prev_end if prev_end is not None else P(q0)
+        end = first if (closed and k == len(prims) - 1 and first is not None) else P(q1)
+        curve, ok = None, True
+        try:
+            if p['type'] == 'line':
+                curve = curves.sketchLines.addByTwoPoints(start, end)
+            elif p['type'] == 'arc':
+                curve = curves.sketchArcs.addByThreePoints(start, P(p['mid']), end)
+            else:
+                pc = adsk.core.ObjectCollection.create()
+                pc.add(start)
+                for q in p['pts'][1:-1]:
+                    pc.add(P(q))
+                pc.add(end)
+                curve = curves.sketchFittedSplines.add(pc)
+        except Exception:
+            ok = False
+        if not ok:
+            n += draw_prims(sketch, [p], notes)
+        else:
+            n += 1
+        if curve is None:
+            prev_end = None
+            made.append((p, None))
+            continue
+        if k == 0:
+            first = _nearest_end(curve, P(q0))
+        prev_end = _nearest_end(curve, P(q1))
+        made.append((p, curve))
+    gc = sketch.geometricConstraints
+    pairs = list(zip(made, made[1:]))
+    if closed:
+        pairs.append((made[-1], made[0]))
+    for (pa, ca), (pb, cb) in pairs:
+        if not (pa.get('tan1') and pb.get('tan0')):
+            continue
+        if ca is None or cb is None:
+            bump('tangent_failed')
+            continue
+        try:
+            gc.addTangent(ca, cb)
+            bump('tangent')
+        except Exception:
+            bump('tangent_failed')
+    return n
+"""
+
+_XRAY_TIDY_RUNTIME = ("""
+
+# ---- tidy corners: shared sketch points + tangent constraints
+""" + _DRAW_TIDY + """
+
+def draw_section(sketch, sec, notes=None):
+    \"\"\"draw_section with tidy corners (replaces the plain one above).\"\"\"
+    notes = {} if notes is None else notes
+    n = 0
+    for outer, holes in sec['loops']:
+        n += draw_prims_tidy(sketch, outer, notes)
+        for h in holes:
+            n += draw_prims_tidy(sketch, h, notes)
+    for chain in sec.get('open', []):
+        n += draw_prims_tidy(sketch, chain, notes)
+    _tidy_note(notes)
+    return n
+
+
+def _tidy_note(drawn):
+    \"\"\"Keep one sentence in NOTES saying how many tangent constraints
+    were added (the closing message prints NOTES).\"\"\"
+    s = 'Tidy corners: %d tangent constraint(s) added' % drawn.get('tangent', 0)
+    if drawn.get('tangent_failed'):
+        s += ', %d could not be added' % drawn['tangent_failed']
+    if NOTES and NOTES[-1].startswith('Tidy corners:'):
+        NOTES[-1] = s
+    else:
+        NOTES.append(s)
+""")
+
+
+# rails + loft: embedded only when the script has rails (the default
+# script is unchanged); run() gets two hooks at emit time (_RAILS_HOOKS)
+_XRAY_RAILS_RUNTIME = """
+
+# ---- rails (90 degree sections pinned to the profiles) + best-effort loft
+
+LOFT_MAX = 60
+
+
+def draw_rails(root, notes):
+    \"\"\"One construction plane + sketch per rail plane, one fitted spline
+    per rail of RAILS. Returns [(rail, curve)] for the rails drawn.\"\"\"
+    sketches, out = {}, []
+    for r in RAILS:
+        key = tuple(round(c, 6) for c in r['plane']['normal'])
+        if key not in sketches:
+            k = len(sketches) + 1
+            pl, _ = _plane(root, tuple(c / 10.0 for c in r['plane']['origin']), tuple(r['plane']['normal']))
+            pl.name = 'rail plane %d' % k
+            sk = root.sketches.add(pl)
+            sk.name = 'rails %d' % k
+            sketches[key] = sk
+        sk = sketches[key]
+        pc = adsk.core.ObjectCollection.create()
+        for q in r['pts']:
+            pc.add(sk.modelToSketchSpace(adsk.core.Point3D.create(q[0] / 10.0, q[1] / 10.0, q[2] / 10.0)))
+        try:
+            out.append((r, sk.sketchCurves.sketchFittedSplines.add(pc)))
+        except Exception:
+            notes.append('%s: Fusion refused the rail' % r['name'])
+    return out
+
+
+def _loft_with_rails(root, drawn, rail_curves):
+    \"\"\"Loft one new body through the largest material profile of each
+    section sketch, guided by `rail_curves`. Without the rails if Fusion
+    refuses them. Returns how ('with N rails' / 'without rails (why)');
+    raises when Fusion refuses the loft both ways.\"\"\"
+    profs = []
+    for sk, sec in drawn:
+        areas = [a / 100.0 for a in (sec.get('areas_mm2') or [])]
+        cand, _ = _material_profiles(sk, areas)
+        if not cand:
+            raise RuntimeError('%s has no closed profile' % sk.name)
+        profs.append(max(cand, key=lambda p: _area(p) or 0.0))
+    lofts = root.features.loftFeatures
+
+    def attempt(rails):
+        li = lofts.createInput(adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+        for p in profs:
+            li.loftSections.add(p)
+        for c in rails:
+            li.centerLineOrRails.addRail(c)
+        li.isSolid = True
+        return lofts.add(li)
+
+    why = None
+    if rail_curves:
+        try:
+            attempt(rail_curves)
+            return 'with %d rail(s)' % len(rail_curves)
+        except Exception:
+            why = traceback.format_exc().strip().splitlines()[-1]
+    attempt([])
+    return 'without rails (%s)' % why if why else 'without rails'
+
+
+def _rails_and_loft(root, drawn, notes):
+    \"\"\"After the section sketches: draw RAILS, then (LOFT) the loft.\"\"\"
+    curves = draw_rails(root, notes)
+    done = [c for r, c in curves if r['complete']]
+    part = [r for r in RAILS if not r['complete']]
+    s = 'Rails: %d drawn, %d complete' % (len(curves), len(done))
+    if part:
+        s += '; not touching every profile (not used by a loft): ' + '; '.join(
+            '%s (%s)' % (r['name'], r['note']) for r in part[:3]) + (' ...' if len(part) > 3 else '')
+    notes.append(s)
+    if not LOFT:
+        return
+    if len(drawn) < 2:
+        notes.append('Loft skipped: it needs at least two section sketches')
+    elif len(drawn) > LOFT_MAX:
+        notes.append('Loft skipped: %d sections is more than %d; use a bigger spacing for the loft'
+                     % (len(drawn), LOFT_MAX))
+    elif any(not sec['loops'] for sk, sec in drawn):
+        notes.append('Loft skipped: a section has no closed outline')
+    else:
+        try:
+            notes.insert(0, 'Loft: one new body ' + _loft_with_rails(root, drawn, done))
+        except Exception:
+            why = traceback.format_exc().strip().splitlines()[-1]
+            notes.insert(0, 'WARNING: Fusion refused the loft (%s); the sketches and rails are kept' % why)
+
+_DRAWN = []
+"""
+
+_RAILS_HOOKS = (
+    ('            made += 1\n            if sec.get(\'extrude_mm\'):',
+     '            made += 1\n            _DRAWN.append((sk, sec))\n            if sec.get(\'extrude_mm\'):'),
+    ('        prog.hide()\n        msg = ',
+     '        prog.hide()\n        if not cancelled:\n            try:\n'
+     '                _rails_and_loft(root, _DRAWN, notes)\n'
+     '            except Exception:\n'
+     '                notes.insert(0, \'WARNING: the rails failed: %s\' % '
+     'traceback.format_exc().strip().splitlines()[-1])\n        msg = '),
+    ('        for i, sec in enumerate(SECTIONS):\n',
+     '        del _DRAWN[:]                                 # a second run starts afresh\n'
+     '        for i, sec in enumerate(SECTIONS):\n'),
+)
+
+
 def _xray_round(x, nd=4):
     """Plain lists / dicts of rounded floats for embedding in the script."""
     if isinstance(x, dict):
@@ -887,7 +1165,7 @@ def _xray_round(x, nd=4):
     return x
 
 
-def emit_fusion_xray_script(sections, title='X-Ray', notes=()):
+def emit_fusion_xray_script(sections, title='X-Ray', notes=(), tidy=False, rails=None, loft=False):
     """Fusion script for a stack of section sketches, the way the add-in
     does it: the sections are embedded once as data and a small loop draws
     them (one construction plane + one sketch each, curves drawn with
@@ -900,7 +1178,17 @@ def emit_fusion_xray_script(sections, title='X-Ray', notes=()):
     after drawing: the profiles whose area matches a loop's material area
     (so a hole's interior, which Fusion lists as a profile too, stays
     open), each joined to the slabs so far, so the stack comes out as solid
-    slices. `notes` are sentences the script adds to its closing message."""
+    slices. `notes` are sentences the script adds to its closing message.
+    With `tidy` (the sections traced with tidy corners) each loop is drawn
+    through shared sketch points with tangent constraints where the data
+    marks them (`_XRAY_TIDY_RUNTIME`); without it the script is exactly
+    the plain one. `rails` (None = off; else a list, maybe empty, of
+    stl_to_solid.rails.trace_rails dicts, each with a 'name') are drawn as fitted splines on their own planes after the
+    sections, and with `loft` one new body is lofted through the sections
+    along the complete rails (without them if Fusion refuses; the sketches
+    stay either way). With rails every number is written at 6 decimals,
+    so the rails still touch the profiles."""
+    nd = 6 if rails is not None else 4
     data = []
     for i, sec in enumerate(sections):
         data.append(_xray_round({
@@ -910,7 +1198,7 @@ def emit_fusion_xray_script(sections, title='X-Ray', notes=()):
             'open': list(sec.get('open', [])),
             'areas_mm2': list(sec.get('areas_mm2') or []),
             'extrude_mm': sec.get('extrude_mm'),
-        }))
+        }, nd))
     L = [
         '"""Generated by stlToSolid — X-Ray: a stack of mesh section sketches (like',
         'Create Mesh Section Sketch + Fit Curves to Mesh Section for every slice at',
@@ -930,7 +1218,25 @@ def emit_fusion_xray_script(sections, title='X-Ray', notes=()):
     ]
     L += [f'    {e!r},' for e in data]
     L += [']', '', '']
+    if rails is not None:
+        L += ['# rails: fitted splines through the 90-degree cuts, crossings pinned onto',
+              '# the profiles; complete = touches every profile (only those guide a loft)',
+              'RAILS = [']
+        L += ['    %r,' % _xray_round({'name': r.get('name', 'rail %d' % (i + 1)), 'plane': r['plane'],
+                                     'pts': r['pts'], 'complete': bool(r['complete']),
+                                     'note': r.get('note', '')}, 6)
+              for i, r in enumerate(rails)]
+        L += [']', f'LOFT = {bool(loft)!r}', '', '']
     base = emit_fusion_script([])
     L.append(base[base.index('def _plane('):base.index('def _pick(')].rstrip('\n'))
-    L.append(_XRAY_RUNTIME)
+    runtime = _XRAY_RUNTIME
+    if rails is not None:
+        for old, new in _RAILS_HOOKS:
+            assert runtime.count(old) == 1, old
+            runtime = runtime.replace(old, new)
+    L.append(runtime)
+    if tidy:
+        L.append(_XRAY_TIDY_RUNTIME)
+    if rails is not None:
+        L.append(_XRAY_RAILS_RUNTIME)
     return '\n'.join(L)

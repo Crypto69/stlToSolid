@@ -46,6 +46,8 @@ ScaleArg = Annotated[float, Field(gt=0, le=1e6, description='Extra factor after 
 TolArg = Annotated[float, Field(gt=0, le=5, description='Fit tolerance for lines, arcs and splines, mm')]
 JoinArg = Annotated[float, Field(ge=0, le=20, description='Join loose section ends closer than this, mm (0 = never)')]
 TrimArg = Annotated[float, Field(ge=0, le=5, description='Cut slivers thinner than this out of closed loops, mm (0 = off)')]
+TidyArg = Annotated[bool, Field(description='Tidy corners: tangent fillets and exact corners (X-Ray scripts also add tangent constraints)')]
+SharpenArg = Annotated[float, Field(ge=0, le=1, description='Draw rounds that stay within this of their corner as sharp corners, mm (0 = off)')]
 OutDirArg = Annotated[Optional[str], Field(description='Folder for the results. Default: one folder per part under the output folder.')]
 
 
@@ -278,10 +280,12 @@ def build_server(cfg):
         outline: Annotated[bool, Field(description='Closed outer outlines only: leave out open chains and holes')] = False,
         units: UnitsArg = 'mm', scale: ScaleArg = 1.0,
         include_curves: Annotated[bool, Field(description='Also return every fitted curve as 3-D data. Can be long.')] = False,
+        tidy: TidyArg = False, sharpen: SharpenArg = 0.0,
     ) -> CallToolResult:
         src = F.resolve_input(cfg, path, F.MESH_EXTS, 'mesh file')
         sec = await anyio.to_thread.run_sync(lambda: runner.call(cfg, 'trace_section', src, dict(
-            axis=axis, offset=offset_mm, tol=tol, join=join, trim=trim, outline=outline, units=units, scale=scale)))
+            axis=axis, offset=offset_mm, tol=tol, join=join, trim=trim, outline=outline, units=units, scale=scale,
+            tidy=tidy, sharpen=sharpen)))
         png = sec.pop('png_b64')
         loops, opens = sec.pop('loops', []), sec.pop('open', [])
         data = {'axis': axis, 'at_mm': sec.get('at'), 'offset_mm': sec.get('offset'), 'extent_mm': sec.get('extent'),
@@ -320,6 +324,9 @@ def build_server(cfg):
         outline: Annotated[bool, Field(description='Closed outer outlines only')] = False,
         extrude: Annotated[bool, Field(description='Extrude each slice to the next: solid slabs')] = False,
         units: UnitsArg = 'mm', scale: ScaleArg = 1.0, out_dir: OutDirArg = None,
+        tidy: TidyArg = False, sharpen: SharpenArg = 0.0,
+        rails: Annotated[bool, Field(description='Add two 90-degree sections along the stack as loft rails, pinned onto the profiles')] = False,
+        loft: Annotated[bool, Field(description='With rails: loft one new body through the profiles along the rails (best effort; replaces extrude)')] = False,
     ) -> dict[str, Any]:
         src = F.resolve_input(cfg, path, F.MESH_EXTS, 'mesh file')
         stem = F.safe_stem(src)
@@ -331,7 +338,9 @@ def build_server(cfg):
                 res = runner.call(cfg, 'xray_script', src, {
                     'axis': axis, 'from': from_mm, 'to': to_mm, 'step': step_mm, 'tol': tol, 'join': join,
                     'trim': trim, 'outline': outline, 'extrude': extrude, 'units': units, 'scale': scale,
-                    'budget_s': cfg.xray_budget_s}, out_path=tmp, timeout=cfg.xray_budget_s + 120)
+                    'budget_s': cfg.xray_budget_s, 'tidy': tidy, 'sharpen': sharpen,
+                    'rails': rails, 'loft': loft},
+                    out_path=tmp, timeout=cfg.xray_budget_s + 120)
                 final = F.fresh_path(d, stem + res.pop('name'))
                 os.replace(tmp, final)
             finally:

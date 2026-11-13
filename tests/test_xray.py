@@ -33,6 +33,22 @@ def test_stack_offsets_regular_and_end_included():
     assert stack_offsets(0, 1, 0.25, 50) == pytest.approx([0, 0.25, 0.5, 0.75, 1.0])
 
 
+def test_stack_offsets_no_hair_thin_end_plane():
+    # the clamp's rounding leaves the last multiple a hair short of the end:
+    # that plane moves onto the end (two profiles 0.0001 mm apart break a
+    # Fusion loft with rails) instead of a near-duplicate being added
+    h = 2.0000405311585547
+    offs = stack_offsets(-h + 0.5, h - 0.5, 0.5, h)
+    assert len(offs) == 7
+    assert offs[-1] == pytest.approx(h - 0.5)
+    assert min(b - a for a, b in zip(offs, offs[1:])) > 0.49
+    assert stack_offsets(0, 1.005, 0.5, 50) == pytest.approx([0, 0.5, 1.005])
+    # a real short last gap still gets its own end plane
+    assert stack_offsets(0, 1, 0.3, 50) == pytest.approx([0, 0.3, 0.6, 0.9, 1.0])
+    # a single step a hair short keeps both planes
+    assert stack_offsets(0, 0.005, 1.0, 50) == pytest.approx([0, 0.005])
+
+
 def test_stack_offsets_clamp_swap_single():
     # swapped, both ends clamped just inside +-8, end included
     offs = stack_offsets(10, -10, 5, 8)

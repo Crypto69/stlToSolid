@@ -174,6 +174,66 @@ def mean_dihedral_deg(m, cap=400000):
     return float(np.degrees(np.abs(a)).mean())
 
 
+NOISE_SAMPLE = 4000        # vertices sampled for the noise estimate
+NOISE_RING_MAX = 48        # neighbourhood cap (a 2-ring of a regular mesh is ~19)
+NOISE_CREASE_DEG = 30.0    # a neighbourhood whose normals spread more spans an edge
+
+
+def mesh_noise(m, n_sample=NOISE_SAMPLE, crease_deg=NOISE_CREASE_DEG, seed=0):
+    """Surface noise of a mesh in mm: how far vertices scatter off the
+    smooth surface through their neighbours.
+
+    Each sampled vertex's 2-ring is fitted with a quadric height field in
+    its own principal frame (z = ax^2 + bxy + cy^2 + dx + ey + f), so the
+    curvature of a fillet or a dome is taken out and only the scatter is
+    left; neighbourhoods that straddle an edge (normals spread past
+    `crease_deg`) are left out, since no smooth patch explains a crease.
+    The median over the sample is the noise: a jittered servo bracket
+    with sigma 0.01 / 0.03 reads 0.0097 / 0.029.
+
+    Only meaningful on dense meshes (scans). A coarse CAD tessellation has
+    long thin facets whose 2-rings no quadric holds (top_arm_1 reads 0.30),
+    so the pipeline reads it on scan input only and takes a CAD export as
+    exact.
+
+    Returns {'sigma', 'p90', 'n'} (sigma NaN when no neighbourhood could
+    be read: a mesh of a few large facets)."""
+    V = np.asarray(m.vertices, float)
+    nv = len(V)
+    out = {'sigma': float('nan'), 'p90': float('nan'), 'n': 0}
+    if nv < 10:
+        return out
+    N = np.asarray(m.vertex_normals, float)
+    nbr = m.vertex_neighbors
+    rng = np.random.default_rng(seed)
+    idx = rng.choice(nv, size=min(n_sample, nv), replace=False)
+    cos_lim = np.cos(np.radians(crease_deg))
+    res = []
+    for i in idx:
+        ring = set(nbr[i])
+        for j in list(ring):
+            ring.update(nbr[j])
+        ring.add(int(i))
+        if len(ring) < 10:
+            continue
+        ring = np.fromiter(ring, np.int64)[:NOISE_RING_MAX]
+        if (N[ring] @ N[i]).min() < cos_lim:
+            continue
+        P = V[ring] - V[ring].mean(axis=0)
+        _, _, vt = np.linalg.svd(P, full_matrices=False)
+        x, y, z = P @ vt[0], P @ vt[1], P @ vt[2]
+        A = np.column_stack([x * x, x * y, y * y, x, y, np.ones(len(x))])
+        coef, *_ = np.linalg.lstsq(A, z, rcond=None)
+        r = z - A @ coef
+        dof = len(x) - 6
+        if dof > 0:
+            res.append(float(np.sqrt((r @ r) / dof)))
+    if res:
+        out = {'sigma': float(np.median(res)), 'p90': float(np.percentile(res, 90)),
+               'n': len(res)}
+    return out
+
+
 def load_and_prep(path, target_faces=40000, verbose=True,
                   scan_dihedral_deg=SCAN_DIHEDRAL_DEG,
                   scan_min_faces=SCAN_MIN_FACES, units='mm'):

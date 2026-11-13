@@ -31,7 +31,7 @@ CASES = [
     ('flat_gentle_arc_ledge', lambda: synth.flat_gentle_arc(0.5), 'prismatic', 13, 0.02),  # ... and across a 0.5 mm ledge, one cylinder, no slab seams
     ('thin_ledge_0p15',    lambda: synth.flat_gentle_arc(0.15),  'prismatic', 13, 0.02),   # a 0.15 mm ledge is a level of its own, not merged away
     ('sphere_boss',        synth.sphere_boss,                    'facegroup', 7, 0.05),    # face-group engine: 6 planes + 1 analytic sphere
-    ('fillet_top',         synth.fillet_top,                     'facegroup', 10, 0.05),   # face-group engine: 6 planes + 4 cylinders
+    ('fillet_top',         synth.fillet_top,                     'prismatic', 10, 0.05),   # sketch + extrude + one R2 fillet feature (6 planes + 4 cylinders)
     ('boss_fillet_two',    synth.boss_fillet_two,                'facegroup', 12, 0.05),   # face-group engine: two rolling-ball blends -> 2 tori
     ('pencil',             synth.pencil,                         'facegroup', 3, 0.05),    # face-group engine: apex cone closed by a degenerate tip edge
 ]

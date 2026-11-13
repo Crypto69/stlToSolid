@@ -8,6 +8,8 @@ import trimesh
 
 from .mesh_prep import UNIT_SCALE
 from .extrusion import AxisSearchTimeout
+from .boolguard import BooleanGuardError, guarded_cut
+from .nominal import snap_tolerance
 
 # Deterministic surface sampling: the verdict for a given file must not
 # depend on the random state, or parts near a gate flip mode between runs.
@@ -1037,6 +1039,36 @@ def _mesh_clearance(body, outer_metrics, void_metrics, default_dev=0.08):
 
 
 def _assemble_group(body, outer, voids, verbose):
+    """_assemble_group_core, then the volume "places" of the result
+    (places.py) in its metrics: where the solid and the mesh disagree, as
+    ranked regions of missing or excess material."""
+    shape, mode, metrics = _assemble_group_core(body, outer, voids, verbose)
+    if mode != 'faceted' and shape is not None:
+        _add_places(body, shape, metrics, verbose)
+    return shape, mode, metrics
+
+
+def _add_places(body, shape, metrics, verbose):
+    from .places import volume_places, solid_triangles
+    try:
+        sm = solid_triangles(shape)
+        mesh = (trimesh.util.concatenate([body.mesh] + list(body.voids))
+                if body.voids else body.mesh)
+        pl = volume_places(sm, mesh)
+    except Exception as e:
+        if verbose:
+            print(f"[places] not measured ({type(e).__name__}: {e})")
+        return
+    metrics['places'] = pl
+    if verbose:
+        print(f"[places] {len(pl['places'])} place(s) over one {pl['cell_mm']:.2f} mm cell: "
+              f"missing {pl['missing_mm3']:.1f} mm3, excess {pl['excess_mm3']:.1f} mm3")
+        for k, p in enumerate(pl['places'][:3], 1):
+            print(f"[places] {k}: {p['kind']} {p['volume_mm3']:.1f} mm3, depth "
+                  f"{p['depth_mm']:.2f} mm, at {p['center']}")
+
+
+def _assemble_group_core(body, outer, voids, verbose):
     """One (shape, mode, metrics) for a body from its converted outer shell
     and converted voids (each a (shape, mode, metrics)).
 
@@ -1057,6 +1089,7 @@ def _assemble_group(body, outer, voids, verbose):
     void_modes = []
     void_builds = []
     void_errors = []
+    skipped = []            # cavities the guarded cut refused
     for vshape, vmode, vmet in voids:
         void_modes.append(vmode)
         void_builds.append(vmet.get('build', {'mode': vmode}))
@@ -1072,13 +1105,22 @@ def _assemble_group(body, outer, voids, verbose):
         if verbose:
             print(f"[void] inner shells refused ({why}); cutting instead", flush=True)
         result = cq.Shape.cast(shape)
-        for vshape, _, _ in voids:
-            result = result.cut(cq.Shape.cast(vshape), tol=1e-4)
+        for k, (vshape, _, _) in enumerate(voids):
+            try:
+                result = guarded_cut(result, cq.Shape.cast(vshape), tol=1e-4)
+            except BooleanGuardError as e:
+                # a cut that eats the body (volume 0) is worse than a
+                # cavity left solid: keep the material, say so
+                skipped.append(k)
+                if verbose:
+                    print(f"[guard] cavity {k + 1} not cut: {e}", flush=True)
         method, reason = 'boolean', why
     metrics = dict(metrics)
     metrics['voids'] = len(body.voids)
     metrics['void_modes'] = void_modes
     metrics['void_method'] = method
+    if skipped:
+        metrics['voids_not_cut'] = skipped
     if reason:
         metrics['void_reason'] = reason
     metrics['void_s'] = time.time() - t0
@@ -1142,54 +1184,47 @@ def _log_check(metrics, verbose, tag='[check]'):
               f"over {metrics['holes_checked']} bore(s)")
 
 
-def _convert_body(mesh, is_scan, force_prismatic, verbose, tol, accept_p95,
-                  accept_max, accept_hole_max, accept_vol_pct, reduce_tol=0.05,
-                  face_groups=True, pool=None, method='auto', slice_mm=0.2,
-                  slice_axis='auto', loft_ruled=False, loft_opts=None):
-    """Convert one closed body. Returns (TopoDS_Shape, mode, metrics).
+# Nothing about a scan is trustworthy finer than about this many times its
+# surface noise: the fit tolerance and the gates' floor (ScanRuler's rule).
+NOISE_K = 3.0
 
-    `method='loft'` takes the sliced-loft route instead of the ladder: the
-    user chose it, so its result is written whenever it builds and the
-    gate is measured for information only (mode 'loft'); only a loft that
-    cannot be built at all falls back to faceted.
 
-    Route ladder ('auto'), every rung held to the same gate:
-      1. prismatic (extrusion engine) — the only route that yields
-         sketch+extrude structure for the scripts, so it goes first;
-      2. face-group engine — one analytic face per fitted region;
-      3. hybrid — the prismatic solid with its failing regions patched by
-         exact facets;
-      4. faceted — planar-merged, tolerance-reduced triangles (own volume
-         gate; raises if even that cannot represent the body).
-    Any exception on a rung falls through to the next.
-    """
+def _scan_noise(mesh):
+    """Surface noise of a scan body in mm (0 when it cannot be read)."""
+    from .mesh_prep import mesh_noise
+    try:
+        sigma = mesh_noise(mesh)['sigma']
+    except Exception:
+        return 0.0
+    return float(sigma) if np.isfinite(sigma) else 0.0
+
+
+def _snap_bores(cyls, snap_tol, verbose=True):
+    """Cross bores' diameters snapped to nominals within the snap tolerance
+    (an exported Ø3.4 clearance hole fits as 3.39996); the measured radius
+    is kept as 'r_measured'."""
+    from .nominal import snap_diameter_radius
+    n = 0
+    for c in cyls:
+        r = float(c['r'])
+        rs = snap_diameter_radius(r, snap_tol)
+        if rs != r:
+            c['r_measured'] = r
+            c['r'] = rs
+            n += 1
+    if verbose and n:
+        print(f"[snap] {n} bore diameter(s) snapped to nominals (within {2 * snap_tol:.3g} mm)")
+    return n
+
+
+def _prismatic_attempt(mesh, verbose, tol, gates, noise, snap_tol, noise_info, pool=None):
+    """Rung 1 of the ladder: axis search, slab rebuild, cross-axis
+    features, validation. Returns (result, prism): result is (shape,
+    'prismatic', metrics) when the gate passes, else None; prism is
+    (solid, metrics, holes) of a built but rejected solid (for the hybrid
+    rung), else None."""
     from .extrusion import dominant_axis, _axis_basis, MAX_LEVELS
     from .rebuild import build_solid
-    gates = dict(accept_p95=accept_p95, accept_max=accept_max,
-                 accept_hole_max=accept_hole_max, accept_vol_pct=accept_vol_pct)
-
-    if method == 'loft':
-        try:
-            return _loft_body(mesh, verbose, slice_mm, slice_axis, loft_ruled, gates,
-                              loft_opts or {})
-        except Exception as e:
-            if (loft_opts or {}).get('z_range') is not None:
-                # a partial loft has no whole-body fallback: the faceted
-                # body would be the full shell, not the stretch asked for
-                raise RuntimeError(f'partial loft failed ({type(e).__name__}: {e})') from e
-            if verbose:
-                print(f"[loft] failed ({type(e).__name__}: {e}); falling back to faceted")
-        return _faceted_body(mesh, verbose, reduce_tol=reduce_tol)
-
-    # Before any axis work: scoring an axis means cross-sectioning the mesh
-    # several times per candidate, which is wasted on organic geometry.
-    if is_scan and not force_prismatic:
-        if verbose:
-            print('[out] scan input: skipping prismatic attempt '
-                  '(use --force-prismatic to override)')
-        return _faceted_body(mesh, verbose, reduce_tol=reduce_tol)
-
-    # --- 1. prismatic -------------------------------------------------------
     prism = None            # (solid, metrics, holes) kept for the hybrid rung
     try:
         cands = dominant_axis(mesh)
@@ -1237,7 +1272,8 @@ def _convert_body(mesh, is_scan, force_prismatic, verbose, tol, accept_p95,
             print(f"[slabs] warning: {len(nonconst)} slab(s) have varying "
                   f"cross-section; prismatic fit may be poor there")
 
-        solid, rep = build_solid(slabs, axis, tol=tol, verbose=verbose, mesh=mesh)
+        solid, rep = build_solid(slabs, axis, tol=tol, verbose=verbose, mesh=mesh,
+                                 noise=noise, snap_tol=snap_tol)
         from .features import find_cross_cylinders, subtract_cylinders
         # Concave regions are holes; convex ones are bosses/fillets, which
         # must be neither subtracted (that would carve away material) nor
@@ -1247,6 +1283,7 @@ def _convert_body(mesh, is_scan, force_prismatic, verbose, tol, accept_p95,
         all_cyls = find_cross_cylinders(mesh, axis, exclude_parallel=False)
         holes = [c for c in all_cyls if c['concave']]
         cyls = [c for c in holes if not c['parallel']]
+        _snap_bores(cyls, snap_tol, verbose)
         from .features import find_cross_cones, subtract_cones
         cones = [c for c in find_cross_cones(mesh, axis) if c['concave']]
         if cyls or cones:
@@ -1257,6 +1294,9 @@ def _convert_body(mesh, is_scan, force_prismatic, verbose, tol, accept_p95,
                 solid = subtract_cones(solid, cones, mesh=mesh, verbose=verbose)
             solid = finish_solid(solid, verbose=verbose)
         metrics = validate(solid, mesh, cyls=holes)
+        metrics.update(noise_info)
+        if rep and rep[0].get('symmetry'):
+            metrics['symmetry'] = rep[0]['symmetry']
         _log_check(metrics, verbose)
         ok, why = _passes(metrics, **gates)
         if verbose and not ok:
@@ -1266,18 +1306,172 @@ def _convert_body(mesh, is_scan, force_prismatic, verbose, tol, accept_p95,
                             'slabs': rep, 'cross_cyls': cyls, 'cones': cones,
                             'mode': 'prismatic'}
         if ok:
-            return solid.val().wrapped, 'prismatic', metrics
+            return (solid.val().wrapped, 'prismatic', metrics), None
         prism = (solid, metrics, holes)
     except Exception as e:
         if verbose:
             print(f"[out] prismatic rebuild failed ({type(e).__name__}: {e})")
+
+    return None, prism
+
+
+# The sharp part is rebuilt from its own tessellation: this fine, so the
+# prismatic route reads its planes and circles exactly
+FILLET_TESS = (0.002, 0.05)
+FILLET_SNAP_MIN = 0.005     # a fitted round's radius snaps at least this far
+
+
+def _fillet_route(mesh, fg_shape, verbose, tol, gates, snap_tol, noise_info, pool=None):
+    """A face-group solid whose rounds are constant-radius edge blends,
+    rebuilt as sketches + extrudes + fillet features (fillets.py): rounds
+    removed (defeaturing), the sharp part through the prismatic rung, the
+    rounds put back as fillets at nominal radii, the result held to the
+    same gate against the mesh. Returns (shape, 'prismatic', metrics) with
+    the fillets in metrics['build']['fillets'], or None (no rounds, or any
+    step fails: the face-group solid stands)."""
+    from . import fillets as fl
+    from .nominal import snap_radius
+    try:
+        # ruled out first on every possible round (milliseconds): if the part
+        # is no extrusion even without all of them, it is none without some
+        if fl.prismatic_hint(fg_shape, fl.round_candidates(fg_shape)) is None:
+            return None
+        blends = fl.blend_faces(fg_shape)
+        if not blends:
+            return None
+        if fl.prismatic_hint(fg_shape, blends) is None:
+            raise RuntimeError('without its rounds the part is still no extrusion')
+        sharp, sharp_edges = fl.defeature(fg_shape, blends)
+        if any(e is None for e in sharp_edges):
+            raise RuntimeError('a round has no sharp edge to go back on')
+        sm = tessellate_solid(sharp, *FILLET_TESS)
+        sm = trimesh.Trimesh(sm.vertices, sm.faces, process=True)
+        sm.merge_vertices()
+        trimesh.repair.fix_normals(sm)
+        if not sm.is_watertight:
+            raise RuntimeError('the sharp part does not tessellate closed')
+        import io
+        import contextlib
+        quiet = io.StringIO()
+        with contextlib.redirect_stdout(quiet):
+            res, _ = _prismatic_attempt(sm, verbose, tol, gates, 0.0, snap_tol, noise_info, pool)
+        if res is None:
+            raise RuntimeError('the sharp part is not an extrusion')
+        prism_shape, _, pm = res
+        groups = {}
+        meas = {}
+        for (f, kind, r, _), pts in zip(blends, sharp_edges):
+            rn = snap_radius(r, max(snap_tol, FILLET_SNAP_MIN))
+            groups.setdefault(rn, []).append(pts)
+            meas.setdefault(rn, []).append(r)
+        order = sorted(groups.items(), key=lambda kv: -kv[0])      # big rounds first
+        shape, mids = fl.apply_fillets(prism_shape, order)
+    except Exception as e:
+        if verbose:
+            print(f"[fillet] rounds kept as faces ({type(e).__name__}: {e})")
+        return None
+    metrics = validate(shape, mesh, cyls=pm.get('build', {}).get('cross_cyls'))
+    ok, why = _passes(metrics, **gates)
+    if verbose:
+        print(f"[fillet] {len(blends)} round(s) as {len(order)} fillet feature(s) "
+              f"({', '.join(f'R{r:g}' for r, _ in order)}) on a sketch + extrude part: "
+              f"p95 {metrics['dev_p95']:.3f}, max {metrics['dev_max']:.3f}, volume err "
+              f"{metrics['vol_err_pct']:.2f}% -> {'accepted' if ok else 'rejected: ' + '; '.join(why)}")
+    if not ok:
+        return None
+    metrics.update(noise_info)
+    build = dict(pm['build'])
+    build['fillets'] = [{'r': float(r), 'r_measured': [float(x) for x in meas[r]], 'edges': m}
+                        for (r, _), m in zip(order, mids)]
+    metrics['build'] = build
+    if pm.get('symmetry'):
+        metrics['symmetry'] = pm['symmetry']
+    return shape, 'prismatic', metrics
+
+
+def _convert_body(mesh, is_scan, force_prismatic, verbose, tol, accept_p95,
+                  accept_max, accept_hole_max, accept_vol_pct, reduce_tol=0.05,
+                  face_groups=True, pool=None, method='auto', slice_mm=0.2,
+                  slice_axis='auto', loft_ruled=False, loft_opts=None):
+    """Convert one closed body. Returns (TopoDS_Shape, mode, metrics).
+
+    `method='loft'` takes the sliced-loft route instead of the ladder: the
+    user chose it, so its result is written whenever it builds and the
+    gate is measured for information only (mode 'loft'); only a loft that
+    cannot be built at all falls back to faceted.
+
+    Route ladder ('auto'), every rung held to the same gate:
+      1. prismatic (extrusion engine) — the only route that yields
+         sketch+extrude structure for the scripts, so it goes first;
+      2. face-group engine — one analytic face per fitted region;
+      3. hybrid — the prismatic solid with its failing regions patched by
+         exact facets;
+      4. faceted — planar-merged, tolerance-reduced triangles (own volume
+         gate; raises if even that cannot represent the body).
+    Any exception on a rung falls through to the next.
+    """
+    from .extrusion import dominant_axis, _axis_basis, MAX_LEVELS
+    from .rebuild import build_solid
+    gates = dict(accept_p95=accept_p95, accept_max=accept_max,
+                 accept_hole_max=accept_hole_max, accept_vol_pct=accept_vol_pct)
+
+    if method == 'loft':
+        try:
+            return _loft_body(mesh, verbose, slice_mm, slice_axis, loft_ruled, gates,
+                              loft_opts or {})
+        except Exception as e:
+            if (loft_opts or {}).get('z_range') is not None:
+                # a partial loft has no whole-body fallback: the faceted
+                # body would be the full shell, not the stretch asked for
+                raise RuntimeError(f'partial loft failed ({type(e).__name__}: {e})') from e
+            if verbose:
+                print(f"[loft] failed ({type(e).__name__}: {e}); falling back to faceted")
+        return _faceted_body(mesh, verbose, reduce_tol=reduce_tol)
+
+    # Before any axis work: scoring an axis means cross-sectioning the mesh
+    # several times per candidate, which is wasted on organic geometry.
+    if is_scan and not force_prismatic:
+        if verbose:
+            print('[out] scan input: skipping prismatic attempt '
+                  '(use --force-prismatic to override)')
+        return _faceted_body(mesh, verbose, reduce_tol=reduce_tol)
+
+    # Noise sets the tolerance floor: nothing about a scan is known finer
+    # than about three times its noise, so the fit tolerance and the gates
+    # are never tighter than that. A CAD export is taken as exact (its
+    # vertices lie on the true surface; the estimator reads a coarse
+    # tessellation's facets as noise, see mesh_prep.mesh_noise).
+    noise = _scan_noise(mesh) if is_scan else 0.0
+    if noise > 0:
+        tol_in = tol
+        tol = max(tol, NOISE_K * noise)
+        gates = dict(accept_p95=max(accept_p95, NOISE_K * noise),
+                     accept_max=max(accept_max, 2 * NOISE_K * noise),
+                     accept_hole_max=max(accept_hole_max, NOISE_K * noise),
+                     accept_vol_pct=accept_vol_pct)
+        accept_max = gates['accept_max']
+        if verbose:
+            print(f"[noise] scan noise {noise:.4f} mm -> fit tol {tol:.3f} mm"
+                  f"{'' if tol != tol_in else ' (unchanged)'}, gates p95 "
+                  f"{gates['accept_p95']:.3f} / max {gates['accept_max']:.3f} / "
+                  f"bore {gates['accept_hole_max']:.3f}")
+    snap_tol = snap_tolerance(noise, tol)
+    noise_info = {'noise_mm': noise, 'tol_used': tol, 'snap_tol': snap_tol}
+
+    # --- 1. prismatic -------------------------------------------------------
+    result, prism = _prismatic_attempt(mesh, verbose, tol, gates, noise, snap_tol,
+                                       noise_info, pool)
+    if result is not None:
+        return result
 
     # --- 2. face groups -----------------------------------------------------
     if face_groups:
         try:
             r = _facegroup_body(mesh, verbose, tol, gates)
             if r is not None:
-                return r
+                r[2].update(noise_info)
+                fr = _fillet_route(mesh, r[0], verbose, tol, gates, snap_tol, noise_info, pool)
+                return fr if fr is not None else r
         except Exception as e:
             if verbose:
                 print(f"[fgroup] failed ({type(e).__name__}: {e})")

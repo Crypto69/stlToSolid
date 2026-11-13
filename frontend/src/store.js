@@ -71,6 +71,7 @@ let liveSeq = 0
 let traceSeq = 0
 let axisSeq = 0
 let xraySeq = 0
+let railSeq = 0
 // how many polls in a row may fail before the job is given up on: a
 // server busy for a second, or a laptop waking up, is not a lost job
 const POLL_MAX_MISSES = 8
@@ -132,6 +133,14 @@ export const useConvertStore = defineStore('convert', {
     xrayTo: 0,
     xraySpacing: 0.2,
     xrayExtrude: false,
+    // rails: two 90-degree sections along the stack (the script pins them
+    // onto the profiles); xrayRailLines is the raw preview cut
+    // ({ polylines, kind: 'rail' } or null); xrayLoft lofts one body
+    // through the profiles along the rails, instead of extruding
+    xrayRails: false,
+    xrayLoft: false,
+    xrayRailLines: null,
+    xrayRailsError: null,
     xrayTraces: [],
     xrayTotal: 0,
     xrayBusy: false,
@@ -142,6 +151,11 @@ export const useConvertStore = defineStore('convert', {
     // thin walls of the next part put through the X-Ray
     xrayJoin: 2.5,
     xrayTrim: 0,
+    // X-Ray tidy corners: tangent fillets + exact corners, and rounds that
+    // stay within xraySharpen mm of their corner drawn sharp (off by
+    // default: the plain trace is unchanged)
+    xrayTidy: false,
+    xraySharpen: 0.08,
     // a plane slider waiting for a face click in the 3D view: the store key
     // it sets ('xrayFrom' | 'xrayTo' | 'sliceOffset'), or null; the note
     // says where the last pick put that plane ({ key, text })
@@ -313,10 +327,12 @@ export const useConvertStore = defineStore('convert', {
       if (s.tool === 'loft') return s.section ? [s.section] : []
       if (s.tool === 'xray') {
         const n = s.xrayTotal
-        return s.xrayTraces.map((sec, i) => ({
+        const traces = s.xrayTraces.map((sec, i) => ({
           ...sec,
           kind: n === 1 ? 'single' : i === 0 ? 'start' : i === n - 1 ? 'end' : 'mid',
         }))
+        // the rails first, so slices arriving one by one still only append
+        return s.xrayRails && s.xrayRailLines ? [s.xrayRailLines, ...traces] : traces
       }
       return []
     },
@@ -327,7 +343,8 @@ export const useConvertStore = defineStore('convert', {
       (s.xrayTotal > 0 && s.xrayTraces.length === s.xrayTotal ? s.xrayTraces[s.xrayTotal - 1] : null),
     // Where the x-ray's planes go: the JS mirror of section_fit.stack_offsets
     // (swap, clamp just inside the part, from + k*step, the end plane always
-    // included), so the count is live without a server round trip.
+    // included, a last plane a hair short of it moved onto it), so the
+    // count is live without a server round trip.
     xrayOffsets: (s) => {
       const h = s.sliceHalfExtent
       if (!(h > 0)) return []
@@ -340,7 +357,12 @@ export const useConvertStore = defineStore('convert', {
       const n = Math.floor((hi - lo) / step + 1e-9)
       const out = []
       for (let k = 0; k <= n; k++) out.push(lo + k * step)
-      if (hi - out[out.length - 1] > 1e-9) out.push(hi)
+      const gap = hi - out[out.length - 1]
+      if (gap > 1e-9) {
+        // a last plane a hair short of the end moves onto it (no duplicate)
+        if (out.length > 1 && gap < Math.min(0.01, step / 10)) out[out.length - 1] = hi
+        else out.push(hi)
+      }
       return out
     },
     xrayCount: (s) => s.xrayOffsets.length,
@@ -355,7 +377,11 @@ export const useConvertStore = defineStore('convert', {
       q.set('from', String(s.xrayFrom))
       q.set('to', String(s.xrayTo))
       q.set('step', String(s.xraySpacing))
-      if (s.xrayExtrude && s.xrayCount > 1) q.set('extrude', 'true')
+      if (s.xrayRails && s.xrayCount > 1) {
+        q.set('rails', 'true')
+        if (s.xrayLoft) q.set('loft', 'true')
+      }
+      if (s.xrayExtrude && s.xrayCount > 1 && !(s.xrayRails && s.xrayLoft)) q.set('extrude', 'true')
       return `/api/jobs/${s.jobId}/xray-script?${q}`
     },
   },
@@ -383,6 +409,8 @@ export const useConvertStore = defineStore('convert', {
           bodies: [], triangleBody: null, selected: [], hovered: -1, bodiesError: null,
           sliceOffset: 0, sliceOutline: false, section: null, sectionError: null,
           xrayFrom: 0, xrayTo: 0, xrayExtrude: false, xrayTraces: [], xrayTotal: 0,
+          xrayTidy: false, xraySharpen: 0.08,
+          xrayRails: false, xrayLoft: false, xrayRailLines: null, xrayRailsError: null,
           xrayError: null, xrayTraceMs: null, exactExtent: null,
           planePick: null, planePickNote: null,
         })
@@ -555,6 +583,10 @@ export const useConvertStore = defineStore('convert', {
       this.params = { ...DEFAULT_PARAMS, method: this.tool === 'loft' ? 'loft' : 'auto' }
       this.xrayJoin = DEFAULT_PARAMS.slice_join
       this.xrayTrim = DEFAULT_PARAMS.slice_trim
+      this.xrayTidy = false
+      this.xraySharpen = 0.08
+      this.xrayRails = false
+      this.xrayLoft = false
     },
 
     // Remember the part's exact side along `axis` (mm, converted frame), as
@@ -881,6 +913,33 @@ export const useConvertStore = defineStore('convert', {
       }
     },
 
+    // The raw rail cuts for the 3D view (cheap: no fitting). Only while
+    // the Rails tick is on; the last answer wins.
+    async fetchRails() {
+      const mine = ++railSeq
+      if (!this.xrayRails || !this.jobId || !this.resolvedSliceAxis || this.xrayFrom === this.xrayTo) {
+        this.xrayRailLines = null
+        this.xrayRailsError = null
+        return
+      }
+      const q = new URLSearchParams({
+        axis: this.resolvedSliceAxis, from: String(this.xrayFrom), to: String(this.xrayTo),
+        units: this.params.units, scale: String(this.params.scale),
+      })
+      try {
+        const res = await fetch(`/api/jobs/${this.jobId}/xray-rails?${q}`)
+        if (!res.ok) throw new Error(await errText(res))
+        const data = await res.json()
+        if (mine !== railSeq) return
+        this.xrayRailLines = markRaw({ polylines: data.polylines || [], kind: 'rail' })
+        this.xrayRailsError = null
+      } catch (e) {
+        if (mine !== railSeq) return
+        this.xrayRailLines = null
+        this.xrayRailsError = friendlyError(e)
+      }
+    },
+
     // stop the slice-by-slice trace where it is (the traces so far stay)
     stopXray() {
       xraySeq++
@@ -941,12 +1000,19 @@ export const useConvertStore = defineStore('convert', {
 // The query every section trace and sketch download shares: the plane
 // (axis + offset from centre) and the fit settings.
 function sectionQuery(s, offset) {
-  return new URLSearchParams({
+  const q = new URLSearchParams({
     axis: s.resolvedSliceAxis, offset: String(offset), tol: String(s.params.tol),
     units: s.params.units, scale: String(s.params.scale),
     join: String(s.sliceJoin), outline: s.sliceOutline ? 'true' : 'false',
     trim: String(s.sliceTrim || 0),
   })
+  // tidy corners is an X-Ray option; left out when off, so those URLs
+  // stay as they were
+  if (s.tool === 'xray' && s.xrayTidy) {
+    q.set('tidy', 'true')
+    q.set('sharpen', String(s.xraySharpen || 0))
+  }
+  return q
 }
 
 // Before a plain <a download> link is followed: ask the server whether the

@@ -129,7 +129,21 @@ def body_script(info, params, body_name='body', indent=''):
         L.append(f"{indent}# cross-axis cone (countersink) half-angle {_f(np.degrees(c['half_angle']), 1)} deg")
         L.append(f"{indent}{body_name} = {body_name}.cut(cq.Workplane('XY').newObject([cq.Solid.makeCone({_f(r0)}, {_f(r1)}, "
                  f"{_f(a1 - a0)}, cq.Vector{_vec(pnt)}, cq.Vector{_vec(ax)})]), tol=1e-4)")
+    for fi in info.get('fillets', []):
+        L.append(f"{indent}# fillet R{_f(fi['r'])} on {len(fi['edges'])} edge(s)")
+        L.append(f"{indent}{body_name} = _fillet({body_name}, {[tuple(round(c, 6) for c in p) for p in fi['edges']]}, "
+                 f"{_f(fi['r'])})")
     return L
+
+
+FILLET_HELPER = [
+    'def _fillet(wp, pts, r):',
+    '    """Fillet the edges nearest the given points with radius r."""',
+    '    shape = wp.val()',
+    '    edges = [min(shape.Edges(), key=lambda e: e.distance(cq.Vertex.makeVertex(*p))) for p in pts]',
+    "    return cq.Workplane('XY').newObject([shape.fillet(r, edges)])",
+    '',
+]
 
 
 def emit_script(bodies_info, out_step_name='part.step'):
@@ -164,6 +178,8 @@ def emit_script(bodies_info, out_step_name='part.step'):
     ]
     head += params.lines()
     head.append('')
+    if any(info.get('fillets') for info in bodies_info):
+        head += FILLET_HELPER
     body = []
     for ch in chunks:
         body += ch
