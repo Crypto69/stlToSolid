@@ -5,7 +5,7 @@
 <h1 align="center">stlToSolid — User Manual</h1>
 
 <p align="center"><b>Mesh in · solid out</b><br>
-Version 0.6.1 · November 2026</p>
+Version 0.7.0 · November 2026</p>
 
 ---
 

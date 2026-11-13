@@ -1,6 +1,6 @@
 [project]
 name = "stltosolid-mcpb"
-version = "0.6.1"
+version = "0.7.0"
 description = "The Claude Desktop bundle of the stlToSolid MCP server"
 requires-python = ">=3.11,<3.14"
-dependencies = ["stltosolid[mcp]==0.6.1"]
+dependencies = ["stltosolid[mcp]==0.7.0"]

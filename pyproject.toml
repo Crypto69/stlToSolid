@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "stltosolid"
-version = "0.6.1"
+version = "0.7.0"
 description = "Convert STL/OBJ meshes into prismatic STEP solids via extrusion-structure recognition, with a faceted-BREP fallback"
 readme = "README.md"
 authors = [{ name = "Chris Venter" }]

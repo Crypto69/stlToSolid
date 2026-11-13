@@ -2,7 +2,7 @@
   "manifest_version": "0.4",
   "name": "stltosolid",
   "display_name": "stlToSolid",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "description": "Turn STL and OBJ meshes and dimensioned drawings into real CAD solids: STEP files and Fusion 360 scripts.",
   "long_description": "stlToSolid gives an AI assistant the tools of the stlToSolid app. It can look at a mesh, convert it to a STEP with true planes, cylinders and fillets, loft smooth shapes, trace cross-sections into Fusion 360 sketches, and build a parametric part from a drawing it reads.\n\nFirst start: the geometry kernel is a large download, about 2.8 GB, and the first start takes a few minutes. Later starts take under a second.\n\nFree for personal, hobby, educational and research use (PolyForm Noncommercial 1.0.0). Commercial use needs the author's permission.",
   "author": { "name": "Chris Venter", "url": "https://stltosolid.com" },
