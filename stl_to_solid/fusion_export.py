@@ -770,6 +770,15 @@ def _track(feat, bodies, seen):
             bodies.append(b)
 
 
+def _area(pr):
+    \"\"\"A profile's area (cm2), or None when Fusion cannot measure it (a
+    zero-size scrap where a leaky outline touches itself).\"\"\"
+    try:
+        return pr.areaProperties().area
+    except Exception:
+        return None
+
+
 def _material_profiles(sketch, areas_cm2, rel=0.03):
     \"\"\"The profiles to extrude. Fusion lists a hole's interior as a
     profile as well as the ring around it; extruding both fills the hole.
@@ -779,12 +788,13 @@ def _material_profiles(sketch, areas_cm2, rel=0.03):
     matching (a fit that went wrong), every profile is taken and matched
     is False so the run can say so.\"\"\"
     profs = [sketch.profiles.item(i) for i in range(sketch.profiles.count)]
+    profs = [pr for pr in profs if _area(pr) is not None] or profs     # drop scraps
     if not areas_cm2:
         return profs, True
     out = []
     for pr in profs:
-        a = pr.areaProperties().area
-        if any(abs(a - e) <= rel * max(e, 1e-9) for e in areas_cm2):
+        a = _area(pr)
+        if a is not None and any(abs(a - e) <= rel * max(e, 1e-9) for e in areas_cm2):
             out.append(pr)
     if out:
         return out, True
@@ -1073,7 +1083,7 @@ def _loft_with_rails(root, drawn, rail_curves):
         cand, _ = _material_profiles(sk, areas)
         if not cand:
             raise RuntimeError('%s has no closed profile' % sk.name)
-        profs.append(max(cand, key=lambda p: p.areaProperties().area))
+        profs.append(max(cand, key=lambda p: _area(p) or 0.0))
     lofts = root.features.loftFeatures
 
     def attempt(rails):

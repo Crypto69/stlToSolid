@@ -343,7 +343,8 @@ export const useConvertStore = defineStore('convert', {
       (s.xrayTotal > 0 && s.xrayTraces.length === s.xrayTotal ? s.xrayTraces[s.xrayTotal - 1] : null),
     // Where the x-ray's planes go: the JS mirror of section_fit.stack_offsets
     // (swap, clamp just inside the part, from + k*step, the end plane always
-    // included), so the count is live without a server round trip.
+    // included, a last plane a hair short of it moved onto it), so the
+    // count is live without a server round trip.
     xrayOffsets: (s) => {
       const h = s.sliceHalfExtent
       if (!(h > 0)) return []
@@ -356,7 +357,12 @@ export const useConvertStore = defineStore('convert', {
       const n = Math.floor((hi - lo) / step + 1e-9)
       const out = []
       for (let k = 0; k <= n; k++) out.push(lo + k * step)
-      if (hi - out[out.length - 1] > 1e-9) out.push(hi)
+      const gap = hi - out[out.length - 1]
+      if (gap > 1e-9) {
+        // a last plane a hair short of the end moves onto it (no duplicate)
+        if (out.length > 1 && gap < Math.min(0.01, step / 10)) out[out.length - 1] = hi
+        else out.push(hi)
+      }
       return out
     },
     xrayCount: (s) => s.xrayOffsets.length,

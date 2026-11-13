@@ -434,3 +434,16 @@ def test_tidy_never_worse_than_plain_by_more_than_a_tenth_of_tol():
             continue
         d = _loop_dev(xy, tidy, True)
         assert d <= max(tol, 0.08) or d <= _loop_dev(xy, plain, True) + 0.1 * tol + 1e-9
+
+
+def test_flat_loop_is_dropped_but_thin_walls_are_kept():
+    # a closed spline that folds flat (a wall cut edge-on) encloses nothing:
+    # one such curve stops Fusion finding any profile in the whole sketch
+    from stl_to_solid.section_fit import _flat_loop
+    flat = [{'type': 'spline', 'closed': True,
+             'pts': np.array([[0.0, 0.0], [0.0005, 9.0], [0.0, 18.0], [-0.0005, 9.0]])}]
+    assert _flat_loop(flat, 0.08)
+    thin = [{'type': 'line', 'p0': np.array(a, float), 'p1': np.array(b, float)} for a, b in
+            [((0, 0), (20, 0)), ((20, 0), (20, 0.3)), ((20, 0.3), (0, 0.3)), ((0, 0.3), (0, 0))]]
+    assert not _flat_loop(thin, 0.08)
+    assert not _flat_loop({'center': np.zeros(2), 'r': 1.0}, 0.08)

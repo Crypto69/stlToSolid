@@ -1742,15 +1742,27 @@ def fit_section(V, F, origin, normal, tol=0.08, mesh_pts=None, join_mm=0.0, trim
                    else _open_polyline_dev(sub, prim_points(prims, arc_step_deg=1.0, closed=False)))
             stats['dev_max'] = max(stats['dev_max'], dev)
 
+    kept = []
     for outer, holes in loops:
         fo = fit_loop(outer, tol, mesh_pts, tidy=tidy, sharpen_mm=sharpen_mm, stats=stats)
-        fh = [fit_loop(h, tol, mesh_pts, tidy=tidy, sharpen_mm=sharpen_mm, stats=stats)
-              for h in holes]
+        if _flat_loop(fo, tol):
+            stats['specks'] += 1                # a wall seen edge-on: no area to draw
+            continue
+        fh, hk = [], []
+        for h in holes:
+            q = fit_loop(h, tol, mesh_pts, tidy=tidy, sharpen_mm=sharpen_mm, stats=stats)
+            if _flat_loop(q, tol):
+                stats['specks'] += 1
+                continue
+            fh.append(q)
+            hk.append(h)
         fitted.append((fo, fh))
+        kept.append((outer, hk))
         stats['loops'] += 1
-        stats['holes'] += len(holes)
-        for prims, raw in [(fo, outer)] + list(zip(fh, holes)):
+        stats['holes'] += len(hk)
+        for prims, raw in [(fo, outer)] + list(zip(fh, hk)):
             tally(prims, raw, True)
+    loops = kept
     fopen = []
     for xy in opens:
         prims = fit_loop(xy, tol, mesh_pts, closed=False, tidy=tidy, sharpen_mm=sharpen_mm,
@@ -1761,6 +1773,19 @@ def fit_section(V, F, origin, normal, tol=0.08, mesh_pts=None, join_mm=0.0, trim
     o, u, v, n = frame
     return {'origin': o, 'u': u, 'v': v, 'normal': n, 'loops': fitted, 'open': fopen,
             'raw': loops, 'raw_open': opens, 'stats': stats}
+
+
+def _flat_loop(prims, tol):
+    """True for a fitted closed loop with no width to speak of (mean width
+    2*area/perimeter under max(0.002 mm, tol/40)): a thin wall cut edge-on
+    that the fit folded flat. Fusion draws it as a closed curve that
+    encloses nothing, and one such curve stops Fusion finding any profile
+    in the whole sketch."""
+    if isinstance(prims, dict) or not len(prims):
+        return False
+    q = prim_points(prims, arc_step_deg=1.0)
+    per = _length(q, True)
+    return per > 0 and 2.0 * abs(signed_area(q)) / per < max(0.002, tol / 40.0)
 
 
 def lift_prims(prims, frame):
@@ -1853,13 +1878,19 @@ def lift_section(sec):
 STACK_EDGE_MM = 1e-3
 
 
+STACK_HAIR_MM = 0.01          # a last plane this close to the end plane moves onto it
+
+
 def stack_offsets(frm, to, step, half_extent, edge=STACK_EDGE_MM, tol=1e-9):
     """Plane offsets (mm from the bounding-box centre) of a stack from
     `frm` to `to` every `step`: frm + k*step for every k that stays at or
     under `to`, and `to` itself as the last plane when the last multiple
     falls short, so the end plane the user chose is always cut. Both ends
     are clamped to +-(half_extent - edge); frm > to is swapped; step <= 0
-    or frm == to gives just the one plane."""
+    or frm == to gives just the one plane. When the last multiple is only a
+    hair short of `to` (under min(0.01 mm, step/10), e.g. the clamp's
+    rounding), that plane moves onto `to` instead: two profiles a hair
+    apart break a loft and draw a duplicate sketch."""
     lo, hi = sorted((float(frm), float(to)))
     lim = max(0.0, float(half_extent) - edge)
     lo, hi = min(max(lo, -lim), lim), min(max(hi, -lim), lim)
@@ -1867,8 +1898,12 @@ def stack_offsets(frm, to, step, half_extent, edge=STACK_EDGE_MM, tol=1e-9):
         return [lo]
     n = int(math.floor((hi - lo) / step + tol))
     out = [lo + k * step for k in range(n + 1)]     # k*step, never accumulated
-    if hi - out[-1] > tol:
-        out.append(hi)
+    gap = hi - out[-1]
+    if gap > tol:
+        if len(out) > 1 and gap < min(STACK_HAIR_MM, step / 10.0):
+            out[-1] = hi
+        else:
+            out.append(hi)
     return out
 
 

@@ -380,29 +380,58 @@ def _on_outer_skin(raw, sec2d, tol):
     return d_out <= max(tol / 4.0, 1e-6) and d_out <= d_hole
 
 
+def _note(notes, most=3):
+    """[(section label, reason)] -> 'sections 1-8, 12: reason; section 9:
+    ...': the sections sharing a reason named together, runs as a-b."""
+    groups = {}
+    for lab, why in notes:
+        groups.setdefault(why, []).append(lab)
+    parts = []
+    for why, labs in groups.items():
+        parts.append('%s %s: %s' % ('sections' if len(labs) > 1 else 'section', _runs(labs), why))
+    return '; '.join(parts[:most]) + (' ...' if len(parts) > most else '')
+
+
+def _runs(labs, most=6):
+    """[1, 2, 3, 5, 7, 8, 9] -> '1-3, 5, 7-9' (runs of three or more
+    joined; at most `most` items, then '...')."""
+    items, i = [], 0
+    while i < len(labs):
+        j = i
+        if isinstance(labs[i], int):
+            while j + 1 < len(labs) and labs[j + 1] == labs[j] + 1:
+                j += 1
+        if j - i >= 2:
+            items.append('%s-%s' % (labs[i], labs[j]))
+        else:
+            items += [str(x) for x in labs[i:j + 1]]
+        i = j + 1
+    return ', '.join(items[:most]) + (', ...' if len(items) > most else '')
+
+
 def _one_rail(piece, h, heights, prof_x, ro, rm, tol, snap, secs2d=None, labels=None):
     plane = {'origin': np.asarray(ro, float).tolist(), 'normal': np.asarray(rm, float).tolist()}
     notes, where, crossings = [], [], []
 
     def name(k):
-        return 'section %s' % (labels[k] if labels is not None else k + 1)
+        return labels[k] if labels is not None else k + 1
     for k, hk in enumerate(heights):
         xs = _crossings_at(h, hk)
         if len(xs) != 1:
-            notes.append('%s: %s' % (name(k), 'missed' if not xs else 'crossed %d times' % len(xs)))
+            notes.append((name(k), 'missed' if not xs else 'crossed %d times' % len(xs)))
             continue
         raw = _at(piece, xs[0])
         cands = prof_x[k]
         if not cands:
-            notes.append('%s: its outline does not reach the rail plane' % name(k))
+            notes.append((name(k), 'its outline does not reach the rail plane'))
             continue
         if secs2d is not None and not _on_outer_skin(raw, secs2d[k], tol):
-            notes.append('%s: the rail runs on an inner wall or a hole there' % name(k))
+            notes.append((name(k), 'the rail runs on an inner wall or a hole there'))
             continue
         d = [float(np.linalg.norm(raw - c)) for c in cands]
         j = int(np.argmin(d))
         if d[j] > snap:
-            notes.append('%s: the outline is %.2f mm from the rail' % (name(k), d[j]))
+            notes.append((name(k), 'the outline is %.2f mm from the rail' % d[j]))
             continue
         where.append(xs[0])
         crossings.append([k, np.asarray(cands[j], float)])
@@ -411,7 +440,7 @@ def _one_rail(piece, h, heights, prof_x, ro, rm, tol, snap, secs2d=None, labels=
         pts = piece[douglas_peucker(piece, tol / 2.0)]
         return {'plane': plane, 'pts': pts.tolist(), 'complete': False,
                 'crossings': [[k, q.tolist()] for k, q in crossings],
-                'note': '; '.join(notes[:4]) + (' ...' if len(notes) > 4 else '')}
+                'note': _note(notes)}
     # along the piece (which runs up the axis; the stack may run down)
     order = sorted(range(len(where)), key=lambda i: where[i])
     where = [where[i] for i in order]

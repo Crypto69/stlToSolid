@@ -440,4 +440,16 @@ def test_rail_notes_use_the_scripts_section_numbers(tmp_path):
     secs = _stack(m, [-3.0, 0.0, 3.0])
     rails = trace_rails(m.vertices, m.faces, [0, 0, 1], [0, 0, 0], secs, labels=[2, 4, 6])
     notes = ' '.join(r['note'] for r in rails)
-    assert 'section 2' in notes and 'section 1:' not in notes
+    assert 'sections 2, 4, 6' in notes or 'section 2:' in notes
+    assert 'section 1:' not in notes and 'sections 1' not in notes
+
+
+def test_rail_note_groups_sections_by_reason():
+    from stl_to_solid.rails import _note
+    inner = 'the rail runs on an inner wall or a hole there'
+    assert _note([(k, inner) for k in range(1, 9)]) == 'sections 1-8: ' + inner
+    assert _note([(2, 'missed'), (5, 'missed')]) == 'sections 2, 5: missed'
+    assert _note([(k, 'missed') for k in list(range(1, 12)) + [13, 14] + list(range(16, 30))]) == \
+        'sections 1-11, 13, 14, 16-29: missed'
+    assert _note([(3, 'missed'), (4, 'the outline is 0.30 mm from the rail')]) == \
+        'section 3: missed; section 4: the outline is 0.30 mm from the rail'
