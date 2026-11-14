@@ -346,7 +346,8 @@ def _fake_adsk(monkeypatch):
     core.ValueInput = SimpleNamespace(createByReal=staticmethod(lambda v: v))
     core.ObjectCollection = SimpleNamespace(create=staticmethod(_Coll))
     core.Point3D = SimpleNamespace(create=staticmethod(lambda *a: a))
-    fusion.FeatureOperations = SimpleNamespace(NewBodyFeatureOperation=0, JoinFeatureOperation=1)
+    fusion.FeatureOperations = SimpleNamespace(NewBodyFeatureOperation=0, JoinFeatureOperation=1,
+                                               CutFeatureOperation=2)
     adsk.core, adsk.fusion = core, fusion
     for name, mod in (('adsk', adsk), ('adsk.core', core), ('adsk.fusion', fusion)):
         monkeypatch.setitem(sys.modules, name, mod)

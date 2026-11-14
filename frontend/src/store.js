@@ -136,9 +136,11 @@ export const useConvertStore = defineStore('convert', {
     // rails: two 90-degree sections along the stack (the script pins them
     // onto the profiles); xrayRailLines is the raw preview cut
     // ({ polylines, kind: 'rail' } or null); xrayLoft lofts one body
-    // through the profiles along the rails, instead of extruding
+    // through the profiles along the rails, instead of extruding;
+    // xrayLoftHoles cuts the holes that run through the slices out of it
     xrayRails: false,
     xrayLoft: false,
+    xrayLoftHoles: true,
     xrayRailLines: null,
     xrayRailsError: null,
     xrayTraces: [],
@@ -379,7 +381,10 @@ export const useConvertStore = defineStore('convert', {
       q.set('step', String(s.xraySpacing))
       if (s.xrayRails && s.xrayCount > 1) {
         q.set('rails', 'true')
-        if (s.xrayLoft) q.set('loft', 'true')
+        if (s.xrayLoft) {
+          q.set('loft', 'true')
+          if (!s.xrayLoftHoles) q.set('holes', 'false')
+        }
       }
       if (s.xrayExtrude && s.xrayCount > 1 && !(s.xrayRails && s.xrayLoft)) q.set('extrude', 'true')
       return `/api/jobs/${s.jobId}/xray-script?${q}`
@@ -410,7 +415,7 @@ export const useConvertStore = defineStore('convert', {
           sliceOffset: 0, sliceOutline: false, section: null, sectionError: null,
           xrayFrom: 0, xrayTo: 0, xrayExtrude: false, xrayTraces: [], xrayTotal: 0,
           xrayTidy: false, xraySharpen: 0.08,
-          xrayRails: false, xrayLoft: false, xrayRailLines: null, xrayRailsError: null,
+          xrayRails: false, xrayLoft: false, xrayLoftHoles: true, xrayRailLines: null, xrayRailsError: null,
           xrayError: null, xrayTraceMs: null, exactExtent: null,
           planePick: null, planePickNote: null,
         })
@@ -587,6 +592,7 @@ export const useConvertStore = defineStore('convert', {
       this.xraySharpen = 0.08
       this.xrayRails = false
       this.xrayLoft = false
+      this.xrayLoftHoles = true
     },
 
     // Remember the part's exact side along `axis` (mm, converted frame), as

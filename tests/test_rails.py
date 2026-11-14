@@ -453,3 +453,92 @@ def test_rail_note_groups_sections_by_reason():
         'sections 1-11, 13, 14, 16-29: missed'
     assert _note([(3, 'missed'), (4, 'the outline is 0.30 mm from the rail')]) == \
         'section 3: missed; section 4: the outline is 0.30 mm from the rail'
+
+
+
+# --- holes cut into the loft -------------------------------------------------
+
+class _Pt(tuple):
+    def distanceTo(self, o):
+        return float(np.linalg.norm(np.subtract(self, o)))
+
+
+class _HoleProf:
+    """A Fusion profile with an area (cm2) and a centroid (cm)."""
+    def __init__(self, area, c):
+        self.area, self.c = area, _Pt(c)
+
+    def areaProperties(self):
+        from types import SimpleNamespace
+        return SimpleNamespace(area=self.area, centroid=self.c)
+
+
+def _hole_section(y, holes):
+    """A lifted-section stand-in at height y (mm) with holes [(area mm2, x mm)]."""
+    return {'normal': [0.0, 1.0, 0.0],
+            'holes': [{'loop': 0, 'area_mm2': a, 'centroid': [x, y, 0.0]} for a, x in holes]}
+
+
+def test_hole_chains_follow_each_hole_through_the_stack():
+    from stl_to_solid.rails import hole_chains
+    big, small = 76.9, 3.8
+    secs = [_hole_section(y, [(big, 0.0), (small, 5.4), (small, -5.4)]) for y in (0.5, 1.0, 1.5)]
+    secs.append(_hole_section(2.0, [(big, 0.02), (small, -5.38)]))     # one small hole ends
+    secs.append(None)                                                 # a slice not drawn: a break
+    secs.append(_hole_section(3.0, [(big, 0.0)]))
+    secs.append(_hole_section(3.5, [(big * 3, 0.0), (big, 9.0)]))     # too big / too far: new holes
+    ch = hole_chains(secs)
+    assert sorted(len(c) for c in ch) == [3, 4, 4]
+    by_start = {round(c[0][2][0], 1): c for c in ch}
+    assert [k for k, _, _ in by_start[0.0]] == [0, 1, 2, 3]
+    assert [k for k, _, _ in by_start[5.4]] == [0, 1, 2]
+    assert [k for k, _, _ in by_start[-5.4]] == [0, 1, 2, 3]
+
+
+def test_xray_script_cuts_the_holes_out_of_the_loft(monkeypatch):
+    """Each hole chain becomes a Cut loft through that hole's profile in
+    every slice, with the lofted body as its only participant."""
+    from types import SimpleNamespace
+    from stl_to_solid.fusion_export import emit_fusion_xray_script
+    from .test_xray import _fake_adsk
+    _fake_adsk(monkeypatch)
+    secs = [{'origin': [0, y, 0], 'normal': [0, 1, 0], 'loops': [[[], []]], 'open': [], 'areas_mm2': [100.0]}
+            for y in (0.0, 1.0, 2.0)]
+    holes = [[[k, 4.0, [5.0, float(k), 0.0]] for k in range(3)],
+             [[k, 9.0, [-5.0, float(k), 0.0]] for k in range(2)]]
+    txt = emit_fusion_xray_script(secs, title='t', rails=[_rail(0, [1, 0, 0])], loft=True, holes=holes)
+    ns = {}
+    exec(txt, ns)
+    ns['_plane'] = lambda root, o, n: (SimpleNamespace(name=''), 1.0)
+    assert len(ns['HOLES']) == 2
+    body = SimpleNamespace(name='Body1')
+
+    class Lofts(_Lofts):
+        def add(self, li):
+            li = super().add(li)
+            li.bodies = _Coll([body]) if li.op == 0 else _Coll()
+            return li
+    lofts = Lofts()
+    root, _ = _fake_root(lofts)
+    drawn = []
+    for k, sec in enumerate(ns['SECTIONS']):
+        y = k / 10.0
+        # material ring, the 4 mm2 hole, the 9 mm2 hole (cm, cm2); the last
+        # slice's 9 mm2 hole is missing from the data, so only its first two
+        profs = [_HoleProf(1.0, (0, y, 0)), _HoleProf(0.04, (0.5, y, 0)), _HoleProf(0.09, (-0.5, y, 0))]
+        sk = SimpleNamespace(name='xray %d' % k, profiles=_Coll(profs), sketchToModelSpace=lambda p: p)
+        drawn.append((sk, sec))
+    notes = []
+    ns['_rails_and_loft'](root, drawn, notes)
+    assert notes[0].startswith('Loft: one new body') and notes[1] == 'Holes: 2 cut into the loft'
+    cuts = [li for li in lofts.made if li.op == 2]
+    assert len(cuts) == 2 and all(li.participantBodies == [body] and li.isSolid for li in cuts)
+    assert [p.area for p in cuts[0].loftSections] == [0.04] * 3
+    assert [p.area for p in cuts[1].loftSections] == [0.09] * 2
+    # a hole whose profile is nowhere near: reported, not cut
+    ns['HOLES'][:] = [[[k, 4.0, [30.0, float(k), 0.0]] for k in range(3)]]
+    lofts = Lofts()
+    root, _ = _fake_root(lofts)
+    notes = []
+    ns['_rails_and_loft'](root, drawn, notes)
+    assert notes[1].startswith('Holes: 0 cut into the loft; 1 not cut (hole 1: its outline was not found')

@@ -386,6 +386,7 @@ same thing without a download.
 | **Extrude each slice to the next (solid slabs)** | off | The script also extrudes every sketch up to the next plane and joins the slabs, giving one stepped solid that Fusion always builds. (A Loft between two complex profiles often folds over.) Holes along the axis stay open as long as their loops are drawn. Outline only leaves hole loops out, so it fills them. Needs at least two slices. |
 | **Add 2 rails (90° sections)** | off | Two more cuts, along the stack through the part's centre, shown in cyan in the view. See *Rails and loft* below. Needs at least two slices. |
 | **Loft profiles + rails (new body)** | off | Shown with rails. The script lofts one new body through the slices along the rails. Not with Extrude each slice. |
+| **Cut holes into the loft** | on | Shown with the loft. Every hole that runs through two or more slices is cut out of the lofted body. |
 
 The slices are traced one by one and stay in the view as they appear.
 Click **stop** to halt the tracing and **trace the rest** to carry on.
@@ -415,9 +416,16 @@ decimals when there are rails, so they still touch after rounding.
 - A rail is *complete* when it crosses every slice once, close to its
   outline. Others (a slot wall, a rail that misses a slice) are drawn but no
   loft uses them. The closing message lists them.
-- Holes are ignored: the rails and the loft follow the outer outline. On a
-  hollow part the cuts along the inner walls are drawn too, but marked as not
-  touching every slice.
+- The rails and the loft follow the outer outline. On a hollow part the
+  cuts along the inner walls are drawn too, but marked as not touching every
+  slice.
+- Fusion's Loft fills holes: it uses each slice's outer outline only (it
+  shows the hole outlines in red). With **Cut holes into the loft** the
+  script finds every hole that runs on through two or more slices (same
+  place, similar size) and cuts it out of the lofted body with a loft of its
+  own, so a hole that changes shape along the stack follows it. The closing
+  message says how many were cut. With **Outline only** there are no holes
+  to cut.
 - The loft is best effort. If Fusion refuses the rails it tries without
   them. If it refuses the loft too, the sketches and rails stay and the
   message says why. It is skipped past 60 slices: use a bigger spacing for

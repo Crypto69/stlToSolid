@@ -327,6 +327,7 @@ def build_server(cfg):
         tidy: TidyArg = False, sharpen: SharpenArg = 0.0,
         rails: Annotated[bool, Field(description='Add two 90-degree sections along the stack as loft rails, pinned onto the profiles')] = False,
         loft: Annotated[bool, Field(description='With rails: loft one new body through the profiles along the rails (best effort; replaces extrude)')] = False,
+        holes: Annotated[bool, Field(description='With loft: cut every hole that runs through two or more slices out of the lofted body')] = True,
     ) -> dict[str, Any]:
         src = F.resolve_input(cfg, path, F.MESH_EXTS, 'mesh file')
         stem = F.safe_stem(src)
@@ -339,7 +340,7 @@ def build_server(cfg):
                     'axis': axis, 'from': from_mm, 'to': to_mm, 'step': step_mm, 'tol': tol, 'join': join,
                     'trim': trim, 'outline': outline, 'extrude': extrude, 'units': units, 'scale': scale,
                     'budget_s': cfg.xray_budget_s, 'tidy': tidy, 'sharpen': sharpen,
-                    'rails': rails, 'loft': loft},
+                    'rails': rails, 'loft': loft, 'holes': holes},
                     out_path=tmp, timeout=cfg.xray_budget_s + 120)
                 final = F.fresh_path(d, stem + res.pop('name'))
                 os.replace(tmp, final)

@@ -38,7 +38,7 @@ def over_cap_message(count):
 
 def script(path, axis, frm, to, step, offsets, tol=0.08, units='mm', scale=1.0, join=2.5,
            outline=False, trim=0.0, extrude=False, budget_s=None, tidy=False, sharpen=0.0,
-           rails=False, loft=False):
+           rails=False, loft=False, holes=True):
     """Trace every plane in `offsets` and write the Fusion script: a
     construction plane and a fully enclosed sketch per slice. `extrude` also
     extrudes every slice to the next plane, so the stack comes out as solid
@@ -51,11 +51,13 @@ def script(path, axis, frm, to, step, offsets, tol=0.08, units='mm', scale=1.0, 
     their crossings pinned onto the fitted profiles, every number at 6
     decimals so they still touch), and `loft` a best-effort loft of one new
     body through the profiles along the complete rails (`extrude` is then
-    ignored). Returns {'text', 'name', 'slices', 'notes', 'rails'}; 'name'
-    is the file name's tail after the part's stem."""
+    ignored). `holes` (with loft) cuts every hole that runs through two or
+    more slices out of the loft (rails.hole_chains). Returns {'text',
+    'name', 'slices', 'notes', 'rails', 'holes'}; 'name' is the file name's
+    tail after the part's stem."""
     from stl_to_solid.fusion_export import emit_fusion_xray_script
     from stl_to_solid.section_fit import STACK_EDGE_MM, open_outline_note, stack_extrudes
-    rail_list = []
+    rail_list, chains = [], []
     if rails:
         from stl_to_solid.section_fit import lift_section
         from .sections import rails_for
@@ -73,6 +75,9 @@ def script(path, axis, frm, to, step, offsets, tol=0.08, units='mm', scale=1.0, 
             sec.update(meta)
             secs.append(sec)
         extrude = False if loft else extrude
+        if loft and holes:
+            from stl_to_solid.rails import hole_chains
+            chains = hole_chains([None if s.get('empty') else s for s in secs])
     else:
         loft = False
         secs = trace_stack(path, axis, offsets, tol, units, scale, join, outline, trim, budget_s,
@@ -120,9 +125,13 @@ def script(path, axis, frm, to, step, offsets, tol=0.08, units='mm', scale=1.0, 
         notes.append(f"{len(rail_list)} rail{'s' if len(rail_list) != 1 else ''} traced, {k} touching "
                      "every profile" + ('' if k else ': no rail reaches every section, so a loft runs '
                                          'without rails'))
+    if chains:
+        notes.append(f"{len(chains)} hole{'s' if len(chains) != 1 else ''} running through the slices, "
+                     "each cut from the loft")
     text = emit_fusion_xray_script(sections, title=title, notes=notes, tidy=tidy,
-                                   rails=rail_list if rails else None, loft=loft)
+                                   rails=rail_list if rails else None, loft=loft, holes=chains)
     suffix = '_loft' if loft and n > 1 else ('_solid' if extrude and n > 1 else '')
     return {'text': text, 'name': f'_xray_{axis}{lo:+.1f}_{hi:+.1f}_s{step:g}{suffix}.py',
             'slices': n, 'notes': notes,
-            'rails': {'count': len(rail_list), 'complete': sum(1 for r in rail_list if r['complete'])}}
+            'rails': {'count': len(rail_list), 'complete': sum(1 for r in rail_list if r['complete'])},
+            'holes': len(chains)}

@@ -1848,17 +1848,23 @@ def section_preview_2d(V, F, origin, normal, tol=0.08, join_mm=0.0, closed_only=
 
 def lift_section(sec):
     """A 2-D traced section (section_preview_2d) -> section_preview's dict:
-    primitives in 3-D mm, drawing polylines, material areas, stats."""
+    primitives in 3-D mm, drawing polylines, material areas, stats, and
+    'holes': one {'loop', 'area_mm2', 'centroid' (3-D mm)} per hole (what
+    rails.hole_chains matches from slice to slice)."""
     frame = (sec['origin'], sec['u'], sec['v'], sec['normal'])
-    loops, polys, areas = [], [], []
-    for fo, fh in sec['loops']:
+    loops, polys, areas, holes = [], [], [], []
+    for li, (fo, fh) in enumerate(sec['loops']):
         loops.append((lift_prims(fo, frame), [lift_prims(h, frame) for h in fh]))
         area = 0.0
         for k, prims in enumerate([fo] + fh):
             if len(prims):
                 q = prim_points(prims)
                 polys.append(to_3d(np.vstack([q, q[:1]]), frame).tolist())
-                area += abs(signed_area(q)) * (1.0 if k == 0 else -1.0)
+                a = abs(signed_area(q))
+                area += a * (1.0 if k == 0 else -1.0)
+                if k and a > 0:
+                    holes.append({'loop': li, 'area_mm2': float(a),
+                                  'centroid': to_3d(_poly_centroid(q)[None], frame)[0].tolist()})
         areas.append(float(max(area, 0.0)))
     opens = []
     for prims in sec['open']:
@@ -1867,7 +1873,20 @@ def lift_section(sec):
             polys.append(to_3d(prim_points(prims, closed=False), frame).tolist())
     return {'origin': np.asarray(sec['origin']).tolist(), 'normal': np.asarray(sec['normal']).tolist(),
             'loops': loops, 'open': opens, 'polylines': polys, 'areas_mm2': areas,
-            'stats': sec['stats']}
+            'holes': holes, 'stats': sec['stats']}
+
+
+def _poly_centroid(q):
+    """Area centroid of a closed polygon (N x 2); the vertex mean if it has
+    no area."""
+    q = np.asarray(q, float)
+    x, y = q[:, 0], q[:, 1]
+    x1, y1 = np.roll(x, -1), np.roll(y, -1)
+    cr = x * y1 - x1 * y
+    a = cr.sum() / 2.0
+    if abs(a) < 1e-12:
+        return q.mean(axis=0)
+    return np.array([((x + x1) * cr).sum(), ((y + y1) * cr).sum()]) / (6.0 * a)
 
 
 # ---------------------------------------------------------------------------
