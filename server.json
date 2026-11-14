@@ -8,13 +8,13 @@
     "url": "https://github.com/Crypto69/stlToSolid",
     "source": "github"
   },
-  "version": "0.7.0",
+  "version": "0.7.1",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "stltosolid",
-      "version": "0.7.0",
+      "version": "0.7.1",
       "runtimeHint": "uvx",
       "runtimeArguments": [
         {
