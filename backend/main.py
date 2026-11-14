@@ -373,7 +373,7 @@ async def xray_script(job_id: str, axis: str = 'z', frm: float = Query(0.0, alia
                       units: str = 'mm', scale: float = 1.0, join: float = 2.5,
                       outline: bool = False, trim: float = 0.0, extrude: bool = False,
                       tidy: bool = False, sharpen: float = 0.0, rails: bool = False,
-                      loft: bool = False):
+                      loft: bool = False, holes: bool = True):
     """A stack of section sketches from `from` to `to` every `step` mm as
     one Fusion 360 script: a construction plane and a fully enclosed
     sketch per slice (lines, arcs, circles, fitted splines), drawn by the
@@ -387,7 +387,8 @@ async def xray_script(job_id: str, axis: str = 'z', frm: float = Query(0.0, alia
     and carry tangent constraints. `rails` adds two 90-degree sections
     along the stack as loft rails pinned onto the profiles; `loft` (with
     rails) lofts one new body through the profiles along them, best effort
-    (instead of `extrude`)."""
+    (instead of `extrude`); `holes` (with loft) cuts every hole that runs
+    through two or more slices out of it."""
     _check_slice_params(axis, tol, join, trim, step, sharpen=sharpen)
     job, src = _input_path(job_id)
     from stl_to_solid.service import xray as _xray
@@ -400,7 +401,7 @@ async def xray_script(job_id: str, axis: str = 'z', frm: float = Query(0.0, alia
     try:
         s = await run_in_threadpool(_xray.script, src, axis, frm, to, step, p['offsets'], tol, units,
                                     scale, join, outline, trim, extrude, XRAY_BUDGET_S, tidy,
-                                    sharpen, rails, rails and loft)
+                                    sharpen, rails, rails and loft, holes)
     except TimeoutError as e:
         raise HTTPException(400, str(e))
     except Exception as e:

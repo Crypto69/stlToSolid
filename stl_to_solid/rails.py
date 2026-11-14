@@ -460,3 +460,50 @@ def _one_rail(piece, h, heights, prof_x, ro, rm, tol, snap, secs2d=None, labels=
     pts = np.asarray(out, float)
     return {'plane': plane, 'pts': pts.tolist(), 'complete': True,
             'crossings': [[k, q.tolist()] for k, q in crossings], 'note': ''}
+
+
+def hole_chains(sections, min_run=2):
+    """The holes that run on from slice to slice through a stack, as chains
+    a loft can cut: `sections` are lifted sections (section_fit.lift_section,
+    with 'holes' and 'normal') in stack order, None for a slice that was not
+    drawn (it breaks every chain). A hole carries on into the next slice when
+    a hole there has a similar area (within 2x) and its centroid sits within
+    a quarter of the hole's radius (+0.05 mm) across the stack. Returns the
+    chains of at least `min_run` slices, each [[section index, area_mm2,
+    centroid mm], ...] in stack order."""
+    chains, live = [], {}                  # live: hole index in the last slice -> chain
+    prev = None
+    for i, sec in enumerate(sections):
+        holes = (sec or {}).get('holes') or []
+        nxt = {}
+        if sec is not None and prev is not None and holes:
+            n = np.asarray(sec['normal'], float)
+            n = n / (np.linalg.norm(n) or 1.0)
+            pairs = []
+            for a, ha in enumerate(prev):
+                for b, hb in enumerate(holes):
+                    ra, rb = ha['area_mm2'], hb['area_mm2']
+                    if not (0.5 <= rb / max(ra, 1e-12) <= 2.0):
+                        continue
+                    d = np.asarray(hb['centroid'], float) - np.asarray(ha['centroid'], float)
+                    lat = float(np.linalg.norm(d - (d @ n) * n))
+                    r = math.sqrt(min(ra, rb) / math.pi)
+                    if lat <= 0.25 * r + 0.05:
+                        pairs.append((lat, a, b))
+            used_a, used_b = set(), set()
+            for lat, a, b in sorted(pairs):
+                if a in used_a or b in used_b:
+                    continue
+                used_a.add(a)
+                used_b.add(b)
+                ch = live.get(a)
+                if ch is None:
+                    h = prev[a]
+                    ch = [[i - 1, h['area_mm2'], list(h['centroid'])]]
+                    chains.append(ch)
+                hb = holes[b]
+                ch.append([i, hb['area_mm2'], list(hb['centroid'])])
+                nxt[b] = ch
+        live = nxt
+        prev = holes if sec is not None else None
+    return [c for c in chains if len(c) >= min_run]

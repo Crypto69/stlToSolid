@@ -1075,8 +1075,8 @@ def draw_rails(root, notes):
 def _loft_with_rails(root, drawn, rail_curves):
     \"\"\"Loft one new body through the largest material profile of each
     section sketch, guided by `rail_curves`. Without the rails if Fusion
-    refuses them. Returns how ('with N rails' / 'without rails (why)');
-    raises when Fusion refuses the loft both ways.\"\"\"
+    refuses them. Returns (how, feature): how = 'with N rails' / 'without
+    rails (why)'; raises when Fusion refuses the loft both ways.\"\"\"
     profs = []
     for sk, sec in drawn:
         areas = [a / 100.0 for a in (sec.get('areas_mm2') or [])]
@@ -1098,12 +1098,74 @@ def _loft_with_rails(root, drawn, rail_curves):
     why = None
     if rail_curves:
         try:
-            attempt(rail_curves)
-            return 'with %d rail(s)' % len(rail_curves)
+            return 'with %d rail(s)' % len(rail_curves), attempt(rail_curves)
         except Exception:
             why = traceback.format_exc().strip().splitlines()[-1]
-    attempt([])
-    return 'without rails (%s)' % why if why else 'without rails'
+    feat = attempt([])
+    return ('without rails (%s)' % why if why else 'without rails'), feat
+
+
+def _hole_profile(sk, area_cm2, c_cm):
+    \"\"\"The profile of `sk` that is the inside of the hole with area
+    `area_cm2` and centroid `c_cm` (a Point3D in model space): area within
+    5 %, centroid within a quarter of the hole's radius. None if none.\"\"\"
+    best, bd = None, None
+    for i in range(sk.profiles.count):
+        p = sk.profiles.item(i)
+        a = _area(p)
+        if a is None or abs(a - area_cm2) > 0.05 * area_cm2:
+            continue
+        try:
+            c = p.areaProperties().centroid
+        except Exception:
+            continue
+        # the centroid may come back in sketch space: take the nearer reading
+        d = min(c.distanceTo(c_cm), sk.sketchToModelSpace(c).distanceTo(c_cm))
+        if bd is None or d < bd:
+            best, bd = p, d
+    if best is None or bd > 0.25 * (area_cm2 / 3.14159265) ** 0.5 + 0.005:
+        return None
+    return best
+
+
+def _cut_holes(root, sketch_at, body, chains):
+    \"\"\"Cut each hole chain (rails.hole_chains: [[section index, area mm2,
+    centroid mm], ...]) out of `body` with a loft through the hole's
+    profiles in the sketches `sketch_at` maps section indexes to. Returns
+    (holes cut, [why each other one was not]).\"\"\"
+    lofts = root.features.loftFeatures
+    made, missed = 0, []
+    for n, chain in enumerate(chains):
+        profs = []
+        for k, area, c in chain:
+            sk = sketch_at.get(k)
+            if sk is None:
+                continue
+            p = _hole_profile(sk, area / 100.0, adsk.core.Point3D.create(c[0] / 10.0, c[1] / 10.0, c[2] / 10.0))
+            if p is not None:
+                profs.append(p)
+        if len(profs) < 2:
+            missed.append('hole %d: its outline was not found in two slices' % (n + 1))
+            continue
+        try:
+            li = lofts.createInput(adsk.fusion.FeatureOperations.CutFeatureOperation)
+            for p in profs:
+                li.loftSections.add(p)
+            li.isSolid = True
+            if body is not None:
+                li.participantBodies = [body]
+            lofts.add(li)
+            made += 1
+        except Exception:
+            missed.append('hole %d: %s' % (n + 1, traceback.format_exc().strip().splitlines()[-1]))
+    return made, missed
+
+
+def _holes_note(made, missed):
+    s = 'Holes: %d cut into the loft' % made
+    if missed:
+        s += '; %d not cut (%s%s)' % (len(missed), '; '.join(missed[:3]), ' ...' if len(missed) > 3 else '')
+    return s
 
 
 def _rails_and_loft(root, drawn, notes):
@@ -1127,10 +1189,22 @@ def _rails_and_loft(root, drawn, notes):
         notes.append('Loft skipped: a section has no closed outline')
     else:
         try:
-            notes.insert(0, 'Loft: one new body ' + _loft_with_rails(root, drawn, done))
+            how, feat = _loft_with_rails(root, drawn, done)
+            notes.insert(0, 'Loft: one new body ' + how)
         except Exception:
             why = traceback.format_exc().strip().splitlines()[-1]
             notes.insert(0, 'WARNING: Fusion refused the loft (%s); the sketches and rails are kept' % why)
+            return
+        if HOLES:
+            at = dict((id(sec), i) for i, sec in enumerate(SECTIONS))
+            sketch_at = dict((at[id(sec)], sk) for sk, sec in drawn if id(sec) in at)
+            body = None
+            try:
+                if feat is not None and feat.bodies.count:
+                    body = feat.bodies.item(0)
+            except Exception:
+                pass
+            notes.insert(1, _holes_note(*_cut_holes(root, sketch_at, body, HOLES)))
 
 _DRAWN = []
 """
@@ -1165,7 +1239,8 @@ def _xray_round(x, nd=4):
     return x
 
 
-def emit_fusion_xray_script(sections, title='X-Ray', notes=(), tidy=False, rails=None, loft=False):
+def emit_fusion_xray_script(sections, title='X-Ray', notes=(), tidy=False, rails=None, loft=False,
+                            holes=None):
     """Fusion script for a stack of section sketches, the way the add-in
     does it: the sections are embedded once as data and a small loop draws
     them (one construction plane + one sketch each, curves drawn with
@@ -1186,8 +1261,10 @@ def emit_fusion_xray_script(sections, title='X-Ray', notes=(), tidy=False, rails
     stl_to_solid.rails.trace_rails dicts, each with a 'name') are drawn as fitted splines on their own planes after the
     sections, and with `loft` one new body is lofted through the sections
     along the complete rails (without them if Fusion refuses; the sketches
-    stay either way). With rails every number is written at 6 decimals,
-    so the rails still touch the profiles."""
+    stay either way). `holes` (rails.hole_chains) are then each cut from
+    the loft with a loft of their own through the hole's profiles. With
+    rails every number is written at 6 decimals, so the rails still touch
+    the profiles."""
     nd = 6 if rails is not None else 4
     data = []
     for i, sec in enumerate(sections):
@@ -1226,7 +1303,13 @@ def emit_fusion_xray_script(sections, title='X-Ray', notes=(), tidy=False, rails
                                      'pts': r['pts'], 'complete': bool(r['complete']),
                                      'note': r.get('note', '')}, 6)
               for i, r in enumerate(rails)]
-        L += [']', f'LOFT = {bool(loft)!r}', '', '']
+        L += [']', f'LOFT = {bool(loft)!r}']
+        # holes that run through two or more slices, each cut from the loft
+        # with a loft of its own: [[section index, area mm2, centroid mm], ...]
+        L += ['HOLES = [']
+        L += ['    %r,' % [[int(k), round(float(a), 6), [round(float(x), 6) for x in c]] for k, a, c in ch]
+              for ch in (holes or [])]
+        L += [']', '', '']
     base = emit_fusion_script([])
     L.append(base[base.index('def _plane('):base.index('def _pick(')].rstrip('\n'))
     runtime = _XRAY_RUNTIME

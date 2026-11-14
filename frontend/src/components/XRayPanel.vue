@@ -162,6 +162,13 @@ async function download() {
           <span class="help">After the sketches, the script lofts one new body through every slice's outline along the rails. Best effort: if Fusion refuses the rails it tries without them, and if it refuses the loft the sketches and rails stay and the closing message says why. Not with Extrude each slice.</span>
         </span>
       </label>
+      <label v-if="store.xrayRails && store.xrayLoft" class="check">
+        <input type="checkbox" v-model="store.xrayLoftHoles" />
+        <span>
+          Cut holes into the loft
+          <span class="help">Fusion's Loft follows each slice's outer outline and fills the holes. With this on, every hole that runs through two or more slices is cut out of the lofted body by a loft of its own. Nothing to cut with Outline only (it leaves the holes out).</span>
+        </span>
+      </label>
       <p v-if="store.xrayRails && store.xrayLoft && store.xrayCount > LOFT_MAX" class="hint warn">
         {{ store.xrayCount }} slices is more than {{ LOFT_MAX }} for a loft: the script will skip
         it. Use a bigger spacing for the loft.
