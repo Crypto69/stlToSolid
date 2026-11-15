@@ -5,7 +5,7 @@
 <h1 align="center">stlToSolid — User Manual</h1>
 
 <p align="center"><b>Mesh in · solid out</b><br>
-Version 0.7.1 · November 2026</p>
+Version 0.7.2 · November 2026</p>
 
 ---
 
@@ -472,6 +472,7 @@ Two things happen on top of that read (both new in 0.5.8):
 | **Effort** | high | How hard the model thinks. *high* is the most careful, slowest and most expensive. *medium* takes about half the time. *low* is a quick look. |
 | **How to build** | auto | *auto*: the model looks at the drawing first (one quick, cheap call) and picks a recipe when every feature is a straight extrude, code otherwise. *recipe*: always the parametric table and Fusion script. *code*: always a CadQuery script (any shape, STEP only). Greyed out when the server has code switched off (`STLTOSOLID_ALLOW_CODE=0`). |
 | **Self-check** | off | Look-and-fix rounds, 0 (*off*) to 3. Each round builds the part, draws it from four sides and asks the model to compare the pictures with the drawing, then corrects its answer. Rounds run at *medium* effort when the read ran at *high*. Off by default: a round can also talk the model out of a right reading, so try 1 or 2 on a part and look at the pictures. |
+| **Time limit** | the server's default | Minutes one call to the model may run before the read gives up, 1 to 60. Blank uses the server's default for that provider (5 minutes; DeepSeek 20). Raise it for slow models, high effort or a busy local server. Saved per provider in this browser (or app); **default** clears it. |
 | **Base URL** | — | *Custom* only: the server's address, for example `http://localhost:11434/v1` for Ollama. |
 | **API key** | empty | Your key for that provider. **show** reveals it, **clear** removes it. It is saved in this browser (or app) only and sent with each read. The server never stores it. Local servers usually need no key. |
 | **Notes for the reader** | empty | Optional hints, for example *"the view with the round boss is the top view; ignore the logo"*. |
