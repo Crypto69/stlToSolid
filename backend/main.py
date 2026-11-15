@@ -528,6 +528,8 @@ class ReadBody(BaseModel):
     # look-and-fix rounds: the part is built and drawn from four sides and
     # the model compares the pictures with the drawing
     rounds: int = Field(bp.DEFAULT_ROUNDS, ge=0, le=bp.MAX_ROUNDS)
+    # seconds one model call may take; None = the server's default for the provider
+    timeout_s: Optional[int] = Field(None, ge=bp.MIN_READ_TIMEOUT_S, le=bp.MAX_READ_TIMEOUT_S)
 
 
 def _read_meta(d):
@@ -584,7 +586,7 @@ def blueprint_read(job_id: str, body: ReadBody,
 
     def read_fn():
         return read_drawing(image, body.provider, key or '', model=model, base_url=base_url,
-                            hints=hints, timeout=bp.read_timeout(body.provider), effort=effort,
+                            hints=hints, timeout=bp.read_timeout(body.provider, body.timeout_s), effort=effort,
                             mode=mode, rounds=rounds, builder=builder, progress=progress,
                             allow_code=bp.allow_code())
 

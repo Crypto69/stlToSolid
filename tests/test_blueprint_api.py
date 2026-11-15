@@ -299,6 +299,41 @@ def test_read_timeout_per_provider(monkeypatch):
     monkeypatch.setattr(bp, '_READ_TIMEOUT_ENV', '90')
     monkeypatch.setattr(bp, 'READ_TIMEOUT_S', 90.0)
     assert bp.read_timeout('deepseek') == 90 and bp.read_timeout('openai') == 90
+    # the panel's override beats the environment and the provider's own
+    assert bp.read_timeout('deepseek', 600) == 600 and bp.read_timeout('openai', None) == 90
+
+
+def test_read_takes_the_panels_timeout(tmp_path, monkeypatch):
+    import stl_to_solid.blueprint.read_drawing as rd
+    from backend import blueprint as bp
+    monkeypatch.setattr(bp, '_READ_TIMEOUT_ENV', None)
+    seen = []
+
+    def fake(image, provider, key, model=None, base_url=None, hints='', timeout=0, **kw):
+        seen.append(timeout)
+        return {'recipe': BOX, 'raw_text': '{}', 'usage': {'input_tokens': 1, 'output_tokens': 1, 'calls': 1},
+                'model': 'fake-model', 'provider': provider, 'repaired': False,
+                'validation': {'errors': [], 'warnings': []}, 'seconds': 0.1}
+    monkeypatch.setattr(rd, 'read_drawing', fake)
+    with _client(tmp_path, monkeypatch) as c:
+        cfg = c.get('/api/blueprints/config').json()
+        deepseek = next(p for p in cfg['providers'] if p['key'] == 'deepseek')
+        assert deepseek['default_timeout_s'] == 1200
+        assert cfg['min_timeout_s'] == 60 and cfg['max_timeout_s'] == 3600
+        job = _upload(c, _png(tmp_path)).json()['id']
+        for bad in (59, 3601):
+            r = c.post(f'/api/blueprints/{job}/read', json={'provider': 'anthropic', 'timeout_s': bad},
+                       headers={'X-Api-Key': 'k'})
+            assert r.status_code == 422, bad
+        r = c.post(f'/api/blueprints/{job}/read', json={'provider': 'anthropic', 'timeout_s': 900, 'rounds': 0},
+                   headers={'X-Api-Key': 'k'})
+        assert r.status_code == 200
+        _wait(c, job)
+        r = c.post(f'/api/blueprints/{job}/read', json={'provider': 'anthropic', 'rounds': 0},
+                   headers={'X-Api-Key': 'k'})
+        assert r.status_code == 200
+        _wait(c, job)
+    assert seen == [900.0, 300.0]
 
 
 def test_deepseek_model_list_is_flash_only(monkeypatch):

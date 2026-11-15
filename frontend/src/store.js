@@ -177,6 +177,7 @@ export const useConvertStore = defineStore('convert', {
     blueprintConfig: null,
     provider: bpSaved.provider || 'anthropic',
     providerModel: bpSaved.providerModel || {},     // { provider: model }
+    providerTimeout: bpSaved.providerTimeout || {}, // { provider: seconds }; unset = the server's default
     providerBaseUrl: bpSaved.providerBaseUrl || '',
     apiKeys: bpSaved.apiKeys || {},                 // { provider: key }
     hints: '',
@@ -231,6 +232,9 @@ export const useConvertStore = defineStore('convert', {
     customUrl: (s) => !!s.providerPreset?.custom_url,
     apiKey: (s) => s.apiKeys[s.provider] || '',
     modelName: (s) => (s.providerModel[s.provider] ?? s.providerPreset?.default_model ?? ''),
+    // seconds one model call may take: the user's override, or null for the server's default
+    timeoutOverride: (s) => s.providerTimeout[s.provider] ?? null,
+    defaultTimeout: (s) => s.providerPreset?.default_timeout_s ?? null,
     canRead: (s) =>
       !!s.jobId && !!s.imageUrl && !s.busy && s.status !== 'uploading'
       && (!!s.apiKey || s.hasServerKey || s.providerPreset?.needs_key === false)
@@ -760,6 +764,20 @@ export const useConvertStore = defineStore('convert', {
       this.rounds = Number.isInteger(v) ? Math.max(0, Math.min(this.blueprintConfig?.max_rounds ?? 3, v)) : null
       saveBp({ rounds: this.rounds })
     },
+    // seconds for this provider, clamped to the server's bounds; blank or 0 clears the override
+    setTimeoutSeconds(sec) {
+      const v = Math.round(Number(sec))
+      const t = { ...this.providerTimeout }
+      if (!v || !Number.isFinite(v)) {
+        delete t[this.provider]
+      } else {
+        const lo = this.blueprintConfig?.min_timeout_s ?? 60
+        const hi = this.blueprintConfig?.max_timeout_s ?? 3600
+        t[this.provider] = Math.max(lo, Math.min(hi, v))
+      }
+      this.providerTimeout = t
+      saveBp({ providerTimeout: t })
+    },
     setBaseUrl(u) {
       this.providerBaseUrl = (u || '').trim()
       saveBp({ providerBaseUrl: this.providerBaseUrl })
@@ -811,6 +829,7 @@ export const useConvertStore = defineStore('convert', {
             effort: this.effort,
             mode: this.mode,
             rounds: this.roundsValue,
+            timeout_s: this.timeoutOverride,
           }),
         })
         if (!res.ok) throw new Error(await errText(res))

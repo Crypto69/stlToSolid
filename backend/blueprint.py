@@ -21,6 +21,9 @@ MAX_IMAGE = int(os.environ.get('STLTOSOLID_MAX_IMAGE', 20 * 1024 * 1024))
 # when set, else the provider's own (DeepSeek thinks for minutes at max effort)
 _READ_TIMEOUT_ENV = os.environ.get('STLTOSOLID_BLUEPRINT_TIMEOUT')
 READ_TIMEOUT_S = float(_READ_TIMEOUT_ENV or 300)
+# the panel's per-read override: whole seconds within these bounds
+MIN_READ_TIMEOUT_S = 60
+MAX_READ_TIMEOUT_S = 3600
 
 
 def _flag(name, default):
@@ -67,7 +70,11 @@ def server_key(provider):
     return os.environ.get(env_var(provider)) or None
 
 
-def read_timeout(provider):
+def read_timeout(provider, override=None):
+    """Seconds one model call may take: the user's override from the
+    panel, else STLTOSOLID_BLUEPRINT_TIMEOUT, else the provider's own."""
+    if override:
+        return float(override)
     if _READ_TIMEOUT_ENV:
         return READ_TIMEOUT_S
     return float(PROVIDERS[provider].timeout)
@@ -96,7 +103,10 @@ def config():
             'key': k, 'label': p.label, 'default_model': p.default_model,
             'base_url': p.base_url, 'server_key': server_key(k) is not None,
             'needs_key': p.needs_key, 'custom_url': p.custom_url, 'note': p.note, 'env': env_var(k),
+            'default_timeout_s': read_timeout(k),
         } for k, p in PROVIDERS.items()],
+        'min_timeout_s': MIN_READ_TIMEOUT_S,
+        'max_timeout_s': MAX_READ_TIMEOUT_S,
         'max_image_mb': MAX_IMAGE // (1 << 20),
         'allow_code': allow_code(),
         'code_timeout_s': CODE_TIMEOUT_S,

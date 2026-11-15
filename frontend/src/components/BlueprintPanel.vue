@@ -12,10 +12,20 @@ const keyDraft = ref(store.apiKey)
 const showKey = ref(false)
 const modelDraft = ref(store.modelName)
 const urlDraft = ref(store.providerBaseUrl)
+// time limit: typed in minutes, kept in seconds; blank = the server's default
+const toMinutes = (s) => (s ? String(+(s / 60).toFixed(1)) : '')
+const timeoutDraft = ref(toMinutes(store.timeoutOverride))
 watch(() => store.provider, () => {
   keyDraft.value = store.apiKey
   modelDraft.value = store.modelName
+  timeoutDraft.value = toMinutes(store.timeoutOverride)
 })
+const saveTimeout = () => {
+  const m = String(timeoutDraft.value ?? '').trim()
+  store.setTimeoutSeconds(m === '' ? 0 : Number(m) * 60)
+  timeoutDraft.value = toMinutes(store.timeoutOverride)   // shows the clamped value
+}
+const resetTimeout = () => { timeoutDraft.value = ''; store.setTimeoutSeconds(0) }
 watch(() => store.blueprintConfig, () => { if (!modelDraft.value) modelDraft.value = store.modelName })
 const saveKey = () => store.setKey(keyDraft.value)
 const clearKey = () => { keyDraft.value = ''; store.setKey('') }
@@ -234,6 +244,20 @@ const readLabel = computed(() => {
           <option :value="0">off</option>
           <option v-for="n in (cfg.max_rounds ?? 3)" :key="n" :value="n">{{ n }}</option>
         </select>
+      </div>
+      <div class="row">
+        <label for="bp_timeout">
+          Time limit <span class="help">minutes per model call</span>
+          <button v-if="store.timeoutOverride != null" class="link" type="button" title="use the server's default again" @click="resetTimeout">default</button>
+        </label>
+        <input
+          id="bp_timeout" type="number" class="num" step="1"
+          :min="(cfg.min_timeout_s ?? 60) / 60" :max="(cfg.max_timeout_s ?? 3600) / 60"
+          v-model="timeoutDraft" :placeholder="store.defaultTimeout ? toMinutes(store.defaultTimeout) : 'default'"
+          :class="{ touched: store.timeoutOverride != null }"
+          title="How long one call to the model may run before the read gives up. Blank uses the server's default for this provider. Raise it for slow models or high effort."
+          @blur="saveTimeout" @keydown.enter="saveTimeout"
+        />
       </div>
       <div v-if="store.customUrl" class="row">
         <label for="bp_url">Base URL</label>
