@@ -142,3 +142,6 @@ Third-party parts keep their own licences (CadQuery Apache-2.0, OpenCascade
 LGPL-2.1 with exception, trimesh MIT, shapely/networkx BSD). The optional
 `scan` extra installs pymeshlab, which is GPL-3.0. It is not part of this
 package's licence and is only installed if you ask for it.
+
+The stlToSolid name and logo are not covered by the licence. If you share a
+changed version, give it a different name.
