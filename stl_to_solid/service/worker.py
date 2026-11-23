@@ -166,6 +166,9 @@ def main(argv=None):
                 slice_from=params.get('slice_from'),
                 slice_range_mm=params.get('slice_range_mm', 0.0),
                 slice_range_dir=params.get('slice_range_dir', '-'),
+                half=params.get('half'),
+                half_keep=params.get('half_keep', '+'),
+                half_at=params.get('half_at'),
                 verbose=True)
         # Pass the whole pipeline result through (mode, metrics, and for
         # multi-body files the per-body list and counts).

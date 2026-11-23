@@ -178,7 +178,8 @@ def build_server(cfg):
 
     @mcp.tool(annotations=READ_ONLY, description=(
         'Look at a mesh file before converting it: size, triangle count, whether it is closed, its bodies '
-        '(largest first), a warning when the units look wrong, and a suggested method. Takes a second or '
+        '(largest first), a warning when the units look wrong, a suggested method, and whether it is '
+        'mirror-symmetric about an X, Y or Z plane (then a half model is possible). Takes a second or '
         'two on most parts.'))
     @_guard
     async def inspect_mesh(path: Path_, units: UnitsArg = 'mm', scale: ScaleArg = 1.0) -> dict[str, Any]:
@@ -189,7 +190,8 @@ def build_server(cfg):
     @mcp.tool(annotations=WRITES, description=(
         "Convert a mesh to a STEP solid. Method 'auto' tries prismatic (sketches and extrudes), then face "
         "groups, then faceted, held to the acceptance limits. Method 'loft' slices along an axis and lofts "
-        'the outlines into one smooth solid. Runs one job at a time and can take from seconds to over an '
+        'the outlines into one smooth solid. half writes only one side of a mirror-symmetric part. Runs '
+        'one job at a time and can take from seconds to over an '
         'hour: it answers after wait_s with a job_id if it is still going. Then call job_status.'))
     @_guard
     async def convert_mesh(
@@ -214,6 +216,12 @@ def build_server(cfg):
         slice_from: Annotated[Optional[float], Field(description='Partial loft: start plane, mm from the bounding-box centre')] = None,
         slice_range_mm: Annotated[float, Field(ge=0, le=2000, description='Partial loft: length from the start plane, mm (0 = whole body)')] = 0.0,
         slice_range_dir: Annotated[Literal['+', '-'], Field(description='Partial loft: direction from the start plane')] = '-',
+        half: Annotated[Optional[Literal['x', 'y', 'z']], Field(description=(
+            'Half model: write only one side of a part that is mirror-symmetric about this axis '
+            '(inspect_mesh reports symmetry); default the whole part'))] = None,
+        half_keep: Annotated[Literal['+', '-'], Field(description='Half model: the side kept along the axis')] = '+',
+        half_at: Annotated[Optional[float], Field(ge=-1e6, le=1e6, description=(
+            'Half model: cut plane, mm from the bounding-box centre; default the mirror plane found'))] = None,
         out_dir: OutDirArg = None,
         wait_s: Annotated[Optional[float], Field(ge=0, le=MAX_WAIT_S, description='Seconds to wait before answering with a job_id')] = None,
         ctx: Context = None,
@@ -226,7 +234,7 @@ def build_server(cfg):
                       reduce_tol=reduce_tol, units=units, scale=scale, bodies=bodies, method=method,
                       slice_mm=slice_mm, slice_axis=slice_axis, loft_ruled=loft_ruled, slice_join=slice_join,
                       slice_trim=slice_trim, slice_from=slice_from, slice_range_mm=slice_range_mm,
-                      slice_range_dir=slice_range_dir)
+                      slice_range_dir=slice_range_dir, half=half, half_keep=half_keep, half_at=half_at)
         started = time.time()
         job_id = await anyio.to_thread.run_sync(lambda: runner.start_job(cfg, params, stem, d, src))
         return await _follow(cfg, job_id, cfg.default_wait_s if wait_s is None else wait_s, ctx, started)

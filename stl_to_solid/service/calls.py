@@ -28,6 +28,24 @@ def _flat_share(m):
     return min(1.0, float(m.facets_area.sum()) / area)
 
 
+def _symmetry_mm(sym, k):
+    """The upload's mirror check in converted mm, with the half-model hint
+    an assistant can act on."""
+    if not sym:
+        return None
+    planes = [dict(p, offset_mm=round(p['offset'] * k, 4)) for p in sym['planes']]
+    for p in planes:
+        p.pop('offset', None)
+    a = sym.get('suggested')
+    p = next((q for q in planes if q['axis'] == a), None)
+    how = 'nearly mirror-symmetric (a few per cent of the surface differs)' if p and p.get('nearly') \
+        else 'mirror-symmetric'
+    return {'planes': planes, 'suggested_half': a,
+            'why': (f"The part is {how} about a plane square to {a.upper()}: convert_mesh with "
+                    f"half='{a}' writes only one side, for the user to mirror back in CAD. Ask first."
+                    if a else 'No X, Y or Z mirror plane: write the whole part.')}
+
+
 def inspect_mesh(in_path, out_path, params):
     from stl_to_solid.mesh_prep import UNIT_SCALE, load_mesh
     from .analysis import body_list, mesh_stats
@@ -55,6 +73,7 @@ def inspect_mesh(in_path, out_path, params):
             'try method auto first.' if method == 'auto' else
             f'Only {share * 100:.0f}% of the surface lies in flat regions, which reads as a smooth '
             'shape: try method loft, and fall back to auto if the part has real flats.'),
+        'symmetry': _symmetry_mm(stats.get('symmetry'), k),
         'body_count': len(bodies), 'bodies': out, 'bodies_listed': len(out),
         'bodies_truncated': bool(listed.get('truncated')) or len(bodies) > len(out),
         'suggested_bodies': [b['index'] for b in bodies if b['suggested']],

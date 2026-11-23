@@ -14,7 +14,7 @@ Version 0.7.2 · November 2026</p>
 | # | Section | What it covers |
 |---|---------|----------------|
 | 1 | [Introduction](#1-introduction) | What stlToSolid is for and which tool to pick for your part. |
-| 2 | [Getting started](#2-getting-started) | The screen layout, loading a file, units and scale, picking bodies and moving around the 3D view. |
+| 2 | [Getting started](#2-getting-started) | The screen layout, loading a file, units and scale, picking bodies, half models of symmetric parts and moving around the 3D view. |
 | 3 | [Mesh → Solid](#3-mesh--solid) | Turns a machined or CAD-designed mesh into a clean STEP solid with real flat faces, cylinders and holes. Also gives you editable CadQuery and Fusion 360 scripts. |
 | 4 | [Sliced Loft](#4-sliced-loft) | Slices a smooth, organic shape (a cap, handle or shell) along one axis and lofts the outlines into one smooth solid. |
 | 5 | [X-Ray](#5-x-ray) | Turns slices of the mesh into real Fusion 360 sketches (lines, arcs and splines, not thousands of points) that you can select and extrude. Downloads a whole stack as one script, and can extrude them into solid slabs. |
@@ -139,7 +139,47 @@ at the top of the rail.
 
 Converting only what you need is much faster and uses much less memory.
 
-### 2.5 Moving around the 3D view
+### 2.5 Half model (symmetric parts)
+
+Many parts are the same on both sides: a toy car, a bracket, a controller.
+**Half model** writes only one side into the STEP and the scripts. In
+Fusion, you then **Mirror** the body on its flat cut face to get the whole
+part back, or model on the half and mirror at the end. It works in
+**Mesh → Solid** and **Sliced Loft**.
+
+When you load a file, stlToSolid checks whether it is mirror-symmetric
+about a plane across X, Y or Z. If it is, the **Half model** panel says so,
+for example *"This part looks mirror-symmetric about Y (100% of it lands on
+its mirror image)"*, with a **Write only half** button. You can also tick
+**Write only half** yourself.
+
+| Setting | Default | What it does |
+|---|---|---|
+| **Write only half** | off | Convert the whole part as usual, then cut it on the mirror plane and keep one side. Off for every new file. |
+| **Mirror plane across** | the axis found | X, Y or Z. Each choice shows how well the part matches its mirror image across that axis: *symmetric* (97% or more), *nearly* (90% or more) or just the match. |
+| **Side kept** | + | Which side of the plane stays: **+** keeps the side with the larger coordinates, **−** the other. |
+| **Cut at, mm from centre** | auto | Blank (*auto*) cuts on the mirror plane found in the mesh, or at the bounding-box centre when the part is not symmetric about that axis. Type a number to cut somewhere else. |
+
+A translucent plane in the 3D view shows where the cut goes, tagged with
+the side that is kept (for example **+Y**).
+
+- **Nearly symmetric** means a few per cent of the surface differs from its
+  mirror image: an exhaust on one side, a button, a logo. The cut still goes
+  on the mirror plane, and the half keeps only this side's version of what
+  differs.
+- **Not symmetric:** a yellow note warns that mirroring the half back will
+  not give the original part.
+- Bodies that lie wholly on the other side (two of a car's four loose
+  wheels, say) are not converted at all, which also saves time.
+- The quality checks in the report are measured on the whole part, before
+  the cut. The report says which half was written, where the plane went and
+  how much of the volume was kept.
+- AI-made and scanned meshes are never exactly symmetric. The check allows
+  for that, but a lumpy mesh still converts the way it would whole
+  (usually faceted or as a loft): half the part is half the faces, not a
+  smoother surface.
+
+### 2.6 Moving around the 3D view
 
 ![The view toolbar and the ViewCube](img/view-controls.png)
 *The view toolbar sits at the bottom of the 3D view. The ViewCube sits in the top-right corner. The highlighted button is the active drag tool.*
@@ -747,6 +787,10 @@ bodies, bounding box, edge lengths, surface area, volume and file size.
 **Bodies table** (multi-body files). One row per body: its triangle count,
 which route it took and details.
 
+**Half model.** When only half was written, a line under the badge says
+which side, where the cut went, how much of the volume was kept and how
+well the part matched its mirror image (section 2.5).
+
 **Checks table.** Each check with the measured value, the limit and
 **PASS** or **FAIL**. Deviation is measured both ways: from the mesh to the
 solid and from the solid to the mesh.
@@ -832,6 +876,7 @@ Text Commands**.
 | X-Ray limits | 500 slices, about 4 minutes of fitting per download |
 | Mesh to Outline stack | 10 sections (2 to 400) |
 | Blueprint effort | high |
+| Half model | off; cut on the mirror plane found, keeping the + side |
 
 ### What each tool gives you
 

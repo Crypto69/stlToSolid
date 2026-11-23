@@ -25,6 +25,7 @@ WHICH_TOOL = """# Which stlToSolid tool to use
 
 - Units: STL and OBJ carry none. `units` says what the file's numbers mean and only ever enlarges (`cm` is x10). A cm design exported as mm reads 10x too big and needs `scale` 0.1.
 - Bodies: a file can hold many shells. `suggested_bodies` from `inspect_mesh` leaves out the screws and slivers. Pass `bodies` to convert just those, because a 70-body file can take over an hour.
+- Half model: when `inspect_mesh` reports `symmetry.suggested_half`, the part is mirror-symmetric about a plane square to that axis. Ask the user whether they want only half: `convert_mesh` with `half` set writes one side (`half_keep` '+' or '-'), cut on the mirror plane found (or `half_at` mm from the box centre). They mirror it back in CAD. `report.half` says where the cut went and how well the part matched its mirror image.
 - `trace_section` shows one slice as a picture. Use it to look inside a part, or to find a good plane for a partial loft. Red curves in the picture are open chains: the mesh leaks there.
 
 ## Settings and their defaults
@@ -42,6 +43,7 @@ WHICH_TOOL = """# Which stlToSolid tool to use
 | `tidy` | off | Sections: re-solve corners as tangent fillets and exact corners; X-Ray scripts add tangent constraints |
 | `rails` / `loft` | off | X-Ray scripts: two 90-degree sections as loft rails pinned onto the profiles; with loft, one lofted body (best effort) |
 | `holes` | on | With loft: every hole that runs through two or more slices is cut out of the lofted body (Fusion's Loft fills holes) |
+| `half` / `half_keep` / `half_at` | off / + / mirror plane | Write only one side of a mirror-symmetric part |
 | `sharpen` | 0 mm | Sections: rounds that stay within this of their corner become sharp corners (0.08 is Fusion's Fit Curves feel) |
 
 ## Reading the report
