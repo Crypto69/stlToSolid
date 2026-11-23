@@ -153,6 +153,9 @@ for example *"This part looks mirror-symmetric about Y (100% of it lands on
 its mirror image)"*, with a **Write only half** button. You can also tick
 **Write only half** yourself.
 
+![Half model on a toy car](img/half-model.jpg)
+*A toy car, symmetric about Y. The green plane is where it will be cut; the **+Y** tag marks the side that is kept.*
+
 | Setting | Default | What it does |
 |---|---|---|
 | **Write only half** | off | Convert the whole part as usual, then cut it on the mirror plane and keep one side. Off for every new file. |
