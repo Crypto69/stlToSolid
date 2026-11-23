@@ -41,6 +41,13 @@ export const DEFAULT_PARAMS = {
   // direction (0 = the whole body); slice_from is filled in at submit time
   slice_range_mm: 0,
   slice_range_dir: '-',
+  // half model: write only one side of a mirror-symmetric part, cut at the
+  // plane square to this axis (null: the whole part). half_at null cuts on
+  // the mirror plane the upload check found (the box centre when it found
+  // none); a number is mm from the box centre. Cleared on every upload.
+  half: null,
+  half_keep: '+',
+  half_at: null,
 }
 
 // the most sketches one x-ray script may hold (backend/sections.XRAY_MAX)
@@ -320,13 +327,35 @@ export const useConvertStore = defineStore('convert', {
     // and the traced sections that sit on them, in the same order.
     viewPlanes: (s) => {
       const a = s.resolvedSliceAxis
-      if (!a) return []
-      if (s.tool === 'loft') return [{ axis: a, offset: s.sliceOffset, kind: 'single' }]
-      if (s.tool === 'xray') {
+      // the half-model cut, drawn after the tool's own planes
+      const half = (s.tool === 'solid' || s.tool === 'loft') && s.params.half
+        ? [{ axis: s.params.half, offset: s.halfOffset, kind: 'half', keep: s.params.half_keep }]
+        : []
+      if (s.tool === 'loft' && a) return [{ axis: a, offset: s.sliceOffset, kind: 'single' }, ...half]
+      if (s.tool === 'xray' && a) {
         if (s.xrayFrom === s.xrayTo) return [{ axis: a, offset: s.xrayFrom, kind: 'single' }]
         return [{ axis: a, offset: s.xrayFrom, kind: 'start' }, { axis: a, offset: s.xrayTo, kind: 'end' }]
       }
-      return []
+      return half
+    },
+    // The upload's mirror check: { planes: [{ axis, offset (file units),
+    // match, p90_pct, symmetric }], suggested } or null
+    symmetry: (s) => s.inputStats?.symmetry || null,
+    // the mirror plane found across an axis, or null when the part is not
+    // symmetric about it
+    mirrorPlane: (s) => (axis) => {
+      const p = (s.inputStats?.symmetry?.planes || []).find((q) => q.axis === axis)
+      return p && (p.symmetric || p.nearly) ? p : null
+    },
+    // Where the half cut goes, mm (converted) from the box centre: the
+    // offset given, else the mirror plane found, else the centre
+    halfOffset(s) {
+      if (!s.params.half) return 0
+      if (s.params.half_at !== null && s.params.half_at !== '' && Number.isFinite(Number(s.params.half_at))) {
+        return Number(s.params.half_at)
+      }
+      const p = this.mirrorPlane(s.params.half)
+      return p ? p.offset * s.unitScale : 0
     },
     viewSections: (s) => {
       if (!s.resolvedSliceAxis) return []
@@ -423,6 +452,9 @@ export const useConvertStore = defineStore('convert', {
           xrayError: null, xrayTraceMs: null, exactExtent: null,
           planePick: null, planePickNote: null,
         })
+        // a half cut belongs to one part: a new file starts whole
+        this.params.half = null
+        this.params.half_at = null
         this.loadBodies()
       } catch (e) {
         this.$patch({ status: 'error', error: `Upload failed: ${friendlyError(e)}` })

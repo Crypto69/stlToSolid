@@ -132,6 +132,28 @@ const verdict = computed(() => {
   }
 })
 
+// The half model: which side was written, where the cut went, and how well
+// the part matched its mirror image (null for a whole-part run).
+// 3 decimals, never '-0.000'
+const mm = (v) => (Math.abs(v) < 5e-4 ? 0 : v).toFixed(3)
+const halfNote = computed(() => {
+  const h = store.result?.ok ? store.result.half : null
+  if (!h) return null
+  const A = h.axis.toUpperCase()
+  const side = `${h.keep === '-' ? '\u2212' : '+'}${A}`
+  const how = h.source === 'mirror' ? 'on the mirror plane found'
+    : h.source === 'given' ? 'at the offset you gave' : 'at the box centre'
+  const match = h.match == null ? ''
+    : ` ${Math.round(100 * h.match)}% of the part lands on its mirror image across ${A}${h.symmetric ? '' : h.nearly ? ': nearly symmetric, so the half keeps only this side\'s version of what differs' : ', so it is not really symmetric: mirroring this half back will not give the original'}.`
+  const kept = h.volume_kept_pct == null ? '' : ` ${h.volume_kept_pct.toFixed(1)}% of the volume kept.`
+  const left = (h.bodies_dropped || 0) + (h.bodies_skipped || 0)
+  const bodies = left ? ` ${left} bod${left === 1 ? 'y' : 'ies'} on the other side left out.` : ''
+  return {
+    warn: h.symmetric === false && !h.nearly,
+    text: `Only the ${side} half is in the STEP and the scripts: cut at ${A} = ${mm(h.plane_mm)} mm (${h.offset_mm >= 5e-4 ? '+' : ''}${mm(h.offset_mm)} from the box centre, ${how}).${kept}${bodies}${match} In Fusion, Mirror the body on its flat cut face to get the whole part. The deviation figures below were measured on the whole part, before the cut.`,
+  }
+})
+
 // Per-body rows for multi-body results.
 const bodyRows = computed(() =>
   (bodies.value || []).map((b) => ({
@@ -252,17 +274,23 @@ const outputRows = computed(() => {
   if (kinds.length) {
     rows.push(['Surface types', kinds.map(([k, n]) => `${n} ${k}`).join(', ')])
   }
+  // a half model's volume is the half's; the run's metrics hold the whole
+  const halfVol = r.half?.volume_after_mm3
   if (bodies.value) {
     // per-body detail lives in the bodies table; only file-level rows here
+    if (halfVol != null) rows.push(['Solid volume (half)', `${Math.round(halfVol).toLocaleString()} mm³`])
   } else if (r.mode === 'prismatic' || r.mode === 'facegroup' || r.mode === 'loft') {
     rows.push(['Mean deviation', `${fmt(r.metrics.dev_mean)} mm`])
     rows.push(['Worst point at', `(${(r.metrics.dev_max_xyz || []).join(', ')}) mm`])
-    if (r.metrics.vol_solid != null) {
+    if (halfVol != null) {
+      rows.push(['Solid volume (half)', `${Math.round(halfVol).toLocaleString()} mm³`])
+    } else if (r.metrics.vol_solid != null) {
       rows.push(['Solid volume', `${Math.round(r.metrics.vol_solid).toLocaleString()} mm³`])
     }
   } else {
-    rows.push(['Solid volume', r.metrics.volume == null ? '—'
-      : `${Math.round(r.metrics.volume).toLocaleString()} mm³`])
+    const v = halfVol ?? r.metrics.volume
+    rows.push([halfVol != null ? 'Solid volume (half)' : 'Solid volume', v == null ? '—'
+      : `${Math.round(v).toLocaleString()} mm³`])
   }
   rows.push(['File size', fmtBytes(o.file_size)])
   return rows
@@ -293,6 +321,7 @@ const reduction = computed(() => {
              ref="verdictEl" class="verdict">
       <div class="mode" :class="verdict.cls">{{ verdict.title }}</div>
       <p class="modenote">{{ verdict.note }}</p>
+      <p v-if="halfNote" class="modenote" :class="{ warn: halfNote.warn }">{{ halfNote.text }}</p>
 
       <table v-if="bodyRows.length" class="gatecard bodies">
         <thead>

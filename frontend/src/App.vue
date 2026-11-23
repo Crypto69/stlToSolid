@@ -4,6 +4,7 @@ import MeshViewer from './components/MeshViewer.vue'
 import BodyPicker from './components/BodyPicker.vue'
 import ToolBar from './components/ToolBar.vue'
 import SetupPanel from './components/SetupPanel.vue'
+import HalfPanel from './components/HalfPanel.vue'
 import SolidPanel from './components/SolidPanel.vue'
 import LoftPanel from './components/LoftPanel.vue'
 import XRayPanel from './components/XRayPanel.vue'
@@ -287,6 +288,7 @@ const convertLabel = computed(() => {
             file will be converted as one selection.
           </p>
           <SetupPanel />
+          <HalfPanel v-if="store.tool === 'solid' || store.tool === 'loft'" />
         </template>
         <SolidPanel v-if="store.tool === 'solid'" />
         <LoftPanel v-else-if="store.tool === 'loft'" />

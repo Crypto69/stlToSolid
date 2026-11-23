@@ -214,7 +214,7 @@ def run(in_path, out_path, tol=0.08, accept_p95=0.25, accept_vol_pct=2.0,
         write_script=True, face_groups=True, workers=None, shell_timeout=None,
         bodies=None, scale=1.0, method='auto', slice_mm=0.2, slice_axis='auto',
         loft_ruled=False, slice_join=2.5, slice_trim=0.0, slice_from=None,
-        slice_range_mm=0.0, slice_range_dir='-'):
+        slice_range_mm=0.0, slice_range_dir='-', half=None, half_keep='+', half_at=None):
     """Convert one mesh file to one STEP file.
 
     Every connected body is converted on its own — prismatic where it passes
@@ -253,9 +253,23 @@ def run(in_path, out_path, tol=0.08, accept_p95=0.25, accept_vol_pct=2.0,
     bounding-box centre (the single-slice slider), `slice_range_mm` long
     in direction `slice_range_dir` ('+' or '-') along the slicing axis
     ('auto' then means the file's longest side, as the slider does).
+
+    `half` ('x', 'y' or 'z') writes only one side of a mirror-symmetric
+    part: every body is converted as usual, then cut at the plane square
+    to that axis and only the `half_keep` side ('+' or '-') is written
+    (half.py). `half_at` None puts the plane where the whole file is
+    mirror-symmetric (the box centre when it is not); a number is mm from
+    the file's bounding-box centre. Bodies wholly on the other side are not
+    converted at all. The scripts get the same cut as their last step. The
+    result's 'half' record says where the plane went and how well the part
+    matched its mirror image.
     """
     from .mesh_prep import load_and_prep_bodies
     from .rebuild import write_step
+
+    half_spec = None
+    if half:
+        half_spec = _half_spec(in_path, units, scale, half, half_keep, half_at, verbose)
 
     loft_opts = {'join_mm': float(slice_join or 0.0), 'trim_mm': float(slice_trim or 0.0),
                  'z_range': None}
@@ -309,6 +323,9 @@ def run(in_path, out_path, tol=0.08, accept_p95=0.25, accept_vol_pct=2.0,
                 print(f"[loft] {len(bodies)} bodies cut together as one mesh "
                       f"({len(merged.faces)} faces) for the partial loft")
             bodies = [Body(merged)]
+    n_half_skipped = 0
+    if half_spec is not None:
+        bodies, n_half_skipped = _half_skip(bodies, half_spec, verbose)
     gates = dict(tol=tol, accept_p95=accept_p95, accept_max=accept_max,
                  accept_hole_max=accept_hole_max, accept_vol_pct=accept_vol_pct,
                  reduce_tol=reduce_tol, face_groups=face_groups,
@@ -322,6 +339,11 @@ def run(in_path, out_path, tol=0.08, accept_p95=0.25, accept_vol_pct=2.0,
         results = _convert_all(bodies, is_scan, force_prismatic, verbose, gates,
                                pool, shell_timeout)
         stages.mark('conversion')
+        half_rec = None
+        if half_spec is not None:
+            bodies, results, half_rec = _half_cut_all(bodies, results, half_spec, verbose)
+            half_rec['bodies_skipped'] = n_half_skipped
+            stages.mark('half cut')
         if len(bodies) == 1:
             if isinstance(results[0], Exception):
                 raise results[0]
@@ -329,17 +351,25 @@ def run(in_path, out_path, tol=0.08, accept_p95=0.25, accept_vol_pct=2.0,
             write_step([shape], out_path, names=[_body_name(in_path, 1, 1)])
             stages.mark('STEP')
             if verbose:
-                print(f"[out] {mode} solid -> {out_path}")
+                print(f"[out] {mode} solid -> {out_path}"
+                      + (f" (the {half_rec['keep']}{half_rec['axis'].upper()} half)" if half_rec else ''))
             script, bfill, check, fusion = _write_script(
-                [metrics.pop('build', {'mode': mode})], out_path, write_script, verbose, pool)
+                [metrics.pop('build', {'mode': mode})], out_path, write_script, verbose, pool,
+                half_spec)
             stages.mark('scripts and dry run')
             stages.report()
-            return {'mode': mode, 'metrics': metrics,
-                    'n_bodies': 1, 'n_written': 1, 'n_dropped': n_dropped,
-                    'is_scan': bool(is_scan), 'script': script, 'bfill_script': bfill,
-                    'bfill_check': check, 'fusion_script': fusion}
-        return _finish_multi(bodies, results, in_path, out_path, write_script,
-                             verbose, pool, n_dropped, is_scan, stages)
+            out = {'mode': mode, 'metrics': metrics,
+                   'n_bodies': 1, 'n_written': 1, 'n_dropped': n_dropped,
+                   'is_scan': bool(is_scan), 'script': script, 'bfill_script': bfill,
+                   'bfill_check': check, 'fusion_script': fusion}
+            if half_rec is not None:
+                out['half'] = half_rec
+            return out
+        out = _finish_multi(bodies, results, in_path, out_path, write_script,
+                            verbose, pool, n_dropped, is_scan, stages, half_spec)
+        if half_rec is not None:
+            out['half'] = half_rec
+        return out
     finally:
         if pool is not None:
             pool.close()
@@ -496,7 +526,7 @@ def _pick_bodies(bodies, picked, verbose):
 
 
 def _finish_multi(bodies, results, in_path, out_path, write_script, verbose,
-                  pool, n_dropped, is_scan, stages):
+                  pool, n_dropped, is_scan, stages, half_spec=None):
     from .rebuild import write_step
     per_body, shapes = [], []
     for i, (body, res) in enumerate(zip(bodies, results)):
@@ -529,7 +559,8 @@ def _finish_multi(bodies, results, in_path, out_path, write_script, verbose,
     for b in per_body:
         if b['metrics'] is not None:
             builds.append(b['metrics'].pop('build', {'mode': b['mode']}))
-    script, bfill, check, fusion = _write_script(builds, out_path, write_script, verbose, pool)
+    script, bfill, check, fusion = _write_script(builds, out_path, write_script, verbose, pool,
+                                                 half_spec)
     stages.mark('scripts and dry run')
 
     n_pr = sum(1 for b in per_body if b['mode'] == 'prismatic')
@@ -551,6 +582,132 @@ def _finish_multi(bodies, results, in_path, out_path, write_script, verbose,
             'n_bodies': len(bodies), 'n_written': len(shapes),
             'n_dropped': n_dropped, 'is_scan': bool(is_scan), 'script': script,
             'bfill_script': bfill, 'bfill_check': check, 'fusion_script': fusion}
+
+
+def _half_spec(in_path, units, scale, axis, keep, at, verbose):
+    """Where the half cut goes (half.resolve), read on the whole file in
+    converted mm: the mirror plane of a toy car is the car's, even when only
+    its body shell is picked for conversion."""
+    from .half import resolve, _axis_index, _keep_sign
+    from .mesh_prep import load_mesh, resolve_scale
+    _axis_index(axis)
+    _keep_sign(keep)
+    if at is not None:
+        at = float(at)
+        if not np.isfinite(at):
+            raise ValueError(f'half_at must be a finite number of mm (got {at})')
+    whole = load_mesh(in_path)
+    k = resolve_scale(units, scale)
+    if k != 1.0:
+        whole.apply_scale(k)
+    return resolve(whole, axis, keep, at, verbose=verbose)
+
+
+def _half_skip(bodies, spec, verbose):
+    """The bodies with any part on the kept side (the rest are not
+    converted at all), and how many were skipped."""
+    k, d = spec['index'], float(spec['plane_mm'])
+    keep = []
+    for b in bodies:
+        lo, hi = b.mesh.bounds[0][k], b.mesh.bounds[1][k]
+        span = float(np.max(b.mesh.extents)) if len(b.mesh.faces) else 1.0
+        eps = 1e-6 * max(span, 1.0)
+        off = hi <= d + eps if spec['keep'] == '+' else lo >= d - eps
+        if not off:
+            keep.append(b)
+    n = len(bodies) - len(keep)
+    if not keep:
+        from .half import HalfError
+        raise HalfError(f"nothing lies on the {spec['keep']}{spec['axis'].upper()} side of "
+                        f"{spec['axis'].upper()} = {d:.3f} mm: there is no half to write")
+    if verbose and n:
+        print(f"[half] {n} of {len(bodies)} bodies lie wholly on the cut-away side: not converted")
+    return keep, n
+
+
+def _half_cut_all(bodies, results, spec, verbose):
+    """Cut every converted body back to the kept side. Returns the bodies
+    and results that still hold something, and the run's 'half' record. A
+    body whose cut fails becomes that body's error, as a failed conversion
+    would."""
+    from .half import cut_shape, summary, HalfError
+    kept_b, kept_r, infos = [], [], []
+    for i, (b, r) in enumerate(zip(bodies, results)):
+        if isinstance(r, Exception):
+            kept_b.append(b)
+            kept_r.append(r)
+            continue
+        shape, mode, metrics = r
+        tag = _shell_tag(i, len(bodies)).replace(']', ' half]', 1) if len(bodies) > 1 else '[half]'
+        try:
+            cut, info = cut_shape(shape, spec, tag=tag, verbose=verbose)
+        except HalfError as e:
+            if len(bodies) == 1:
+                raise
+            if verbose:
+                print(f"{tag} {e}")
+            kept_b.append(b)
+            kept_r.append(e)
+            continue
+        infos.append(info)
+        if cut is None:
+            continue
+        metrics['half'] = info
+        kept_b.append(b)
+        kept_r.append((cut, mode, metrics))
+    if not any(not isinstance(r, Exception) for r in kept_r):
+        if kept_r:
+            raise kept_r[0]
+        raise HalfError(f"nothing lies on the {spec['keep']}{spec['axis'].upper()} side of "
+                        f"{spec['axis'].upper()} = {spec['plane_mm']:.3f} mm: there is no half to write")
+    rec = summary(spec, infos)
+    if verbose and rec['volume_kept_pct'] is not None:
+        print(f"[half] {rec['volume_kept_pct']:.1f}% of the converted volume kept "
+              f"({rec['bodies_cut']} cut, {rec['bodies_kept_whole']} whole"
+              + (f", {rec['bodies_dropped']} left out" if rec['bodies_dropped'] else '') + ')')
+    return kept_b, kept_r, rec
+
+
+def _half_scripts(paths, spec, verbose):
+    """The written scripts given the half cut as their last step. Returns
+    the same (cadquery, bfill, outlook, fusion) tuple; a script the cut
+    could not be added to is deleted and its path is None."""
+    from .half import cadquery_half_tail, add_fusion_half
+    script, bfill, check, fusion = paths
+
+    def patch(path, fn, what):
+        if not path:
+            return path
+        try:
+            with open(path, encoding='utf-8') as f:
+                text = f.read()
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(fn(text))
+            if verbose:
+                print(f"[half] {what}: the half cut added as its last step")
+            return path
+        except Exception as e:
+            if verbose:
+                print(f"[half] {what}: could not add the half cut ({type(e).__name__}: {e}); "
+                      f"script removed")
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            return None
+
+    def cq_patch(text):
+        at = text.find('cq.exporters.export(result,')
+        if at < 0:
+            raise ValueError('no export line')
+        stem = text[at:].split(',', 1)[1].split(')', 1)[0].strip()
+        tail = '\n'.join(cadquery_half_tail(spec, stem)) + '\n'
+        return text[:at] + tail + text[at:]
+
+    script = patch(script, cq_patch, 'CadQuery script')
+    fusion = patch(fusion, lambda t: add_fusion_half(t, spec), 'Fusion script')
+    bfill = patch(bfill, lambda t: add_fusion_half(t, spec), 'Boundary Fill script')
+    return script, bfill, check if bfill else None, fusion
 
 
 def _err(e):
@@ -806,7 +963,17 @@ def _body_name(in_path, i, n):
     return stem if n == 1 else f'{stem}_body{i}'
 
 
-def _write_script(builds, out_path, write_script, verbose, pool=None):
+def _write_script(builds, out_path, write_script, verbose, pool=None, half_spec=None):
+    """The scripts (_write_scripts_whole), each given the half cut as its
+    last step when `half_spec` is set. A script the cut cannot be added to
+    is removed rather than left building the whole part."""
+    paths = _write_scripts_whole(builds, out_path, write_script, verbose, pool)
+    if half_spec is None:
+        return paths
+    return _half_scripts(paths, half_spec, verbose)
+
+
+def _write_scripts_whole(builds, out_path, write_script, verbose, pool=None):
     """Write the CadQuery script next to the STEP (same stem, .py), the
     Fusion script for prismatic bodies (<stem>_fusion.py) and the Fusion
     Boundary Fill script for face-group bodies (<stem>_fusion_bfill.py).
@@ -1790,6 +1957,14 @@ def main():
                     help='sliced loft, partial: length to loft from the start plane, mm (0 = whole body)')
     ap.add_argument('--slice-dir', choices=['+', '-'], default='-',
                     help="sliced loft, partial: direction from the start plane (default '-')")
+    ap.add_argument('--half', choices=['x', 'y', 'z'], default=None,
+                    help='half model: write only one side of a part that is mirror-symmetric '
+                         'about this axis (mirror it back in CAD)')
+    ap.add_argument('--half-keep', choices=['+', '-'], default='+',
+                    help="half model: the side kept, '+' (default) or '-' along the axis")
+    ap.add_argument('--half-at', type=float, default=None,
+                    help='half model: cut plane, mm from the bounding-box centre '
+                         '(default: the mirror plane found on the mesh, else the centre)')
     ap.add_argument('--quiet', action='store_true')
     args = ap.parse_args()
     out = args.output or args.input.rsplit('.', 1)[0] + '.step'
@@ -1806,7 +1981,8 @@ def main():
                 slice_axis=args.slice_axis, loft_ruled=args.loft_ruled,
                 slice_join=args.slice_join, slice_trim=args.slice_trim,
                 slice_from=args.slice_from, slice_range_mm=args.slice_range,
-                slice_range_dir=args.slice_dir)
+                slice_range_dir=args.slice_dir, half=args.half,
+                half_keep=args.half_keep, half_at=args.half_at)
     except Exception as e:
         # A crash must not look like a success to a calling script.
         print(f"[error] {type(e).__name__}: {e}", file=sys.stderr)

@@ -136,6 +136,13 @@ class ConvertParams(BaseModel):
     slice_from: Optional[float] = Field(None, description='partial loft: start plane, mm from the bounding-box centre')
     slice_range_mm: float = Field(0.0, ge=0, le=2000, description='partial loft: length from the start plane, mm (0 = whole body)')
     slice_range_dir: Literal['+', '-'] = '-'
+    # Half model: write only one side of a mirror-symmetric part (cut at
+    # the plane square to this axis); None writes the whole part.
+    half: Optional[Literal['x', 'y', 'z']] = None
+    half_keep: Literal['+', '-'] = '+'
+    half_at: Optional[float] = Field(None, ge=-1e6, le=1e6,
+                                     description='half model: cut plane, mm from the bounding-box centre '
+                                                 '(None: the mirror plane found on the mesh)')
 
 
 @app.post('/api/jobs')

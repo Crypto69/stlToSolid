@@ -40,8 +40,26 @@ def mesh_stats(path):
             'mean': round(float(m.edges_unique_length.mean()), 3),
             'max': round(float(m.edges_unique_length.max()), 3),
         } if len(m.edges_unique_length) else None,
+        'symmetry': _symmetry(m),
     }
     return stats
+
+
+def _symmetry(m):
+    """Mirror symmetry about X, Y and Z planes, for the half-model prompt:
+    {'planes': [{'axis', 'offset' (file units from the box centre), 'match',
+    'p90_pct', 'symmetric', 'nearly'}], 'suggested': axis or None}. None when the
+    check cannot run; it never fails an upload."""
+    try:
+        from stl_to_solid.half import mirror_planes, suggest
+        planes = mirror_planes(m)
+    except Exception:
+        return None
+    return {'planes': [{'axis': p['axis'], 'offset': round(float(p['offset_mm']), 4),
+                        'match': round(float(p['match']), 3), 'p90_pct': round(float(p['p90_pct']), 3),
+                        'symmetric': bool(p['symmetric']), 'nearly': bool(p['nearly'])}
+                       for p in planes],
+            'suggested': suggest(planes)}
 
 
 _FACE_KINDS = ('PLANE', 'CYLINDRICAL_SURFACE', 'CONICAL_SURFACE',

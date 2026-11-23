@@ -126,6 +126,38 @@ outlines the slice view shows. "Loft only N mm from this plane" (`--slice-from`,
 at the slider's plane, with flat ends; the check then measures only that
 stretch of the mesh.
 
+### Half model (v0.7.3)
+
+For a part that is mirror-symmetric about an X, Y or Z plane (a toy car, a
+bracket), `--half x|y|z` writes only one side; the user mirrors it back in
+CAD. `half.py` finds the plane: surface samples are reflected through a
+plane square to the axis and looked up in a KD-tree of a dense surface
+sample (trimesh's exact closest point is a thousand times slower on long
+thin triangles); the offset is re-read from the pairs (median of their
+midpoints, voted by the samples whose surface faces along the axis) until
+it settles, and one exact closest-point pass on the surfaces square to the
+axis then puts a CAD export's plane on float precision. The score is the
+share of mirrored samples landing within 1 % of the diagonal of the
+surface: *symmetric* from 97 %, *nearly* from 90 % (with the worst tenth
+inside the band), which reads AI-made and scanned meshes as well as CAD
+exports. The upload stats (`symmetry`) and the MCP `inspect_mesh` carry
+it, so the UI and an assistant can offer the half.
+
+The cut is made on the finished solid, not the mesh: every body is
+converted exactly as it would be whole, then OpenCascade's common with a
+box covering the kept side cuts it (fuzzy retries, validity checked);
+bodies wholly on the other side are not converted at all. Cutting the
+mesh and capping the hole was tried first and left open halves on real
+files. The CadQuery script intersects its result with the same box, and
+the Fusion scripts (prismatic, loft, Boundary Fill) end with a step that
+places the plane (offset from the origin plane, or set directly in a
+direct design), splits every visible solid crossing it and removes the
+bodies on the other side. `--half-keep +|-` picks the side, `--half-at`
+moves the plane (mm from the box centre; default the mirror plane found,
+else the centre). The result's `half` record holds the plane, the source
+(`mirror` / `centre` / `given`), the match and the volume kept; the
+deviation checks are of the whole part, before the cut.
+
 ### Blueprint (v0.5)
 
 The fourth tool starts from a picture, not a mesh: drop or paste a
@@ -244,6 +276,8 @@ stltosolid part.stl --no-face-groups     # skip the face-group engine (prismatic
 stltosolid shell.stl --method loft       # sliced loft: sections every 0.2 mm along the longest axis, smooth loft
 stltosolid shell.stl --method loft --slice-mm 0.5 --slice-axis z --loft-ruled
 stltosolid big.stl --scale 0.1           # a cm design exported as mm: shrink by ten
+stltosolid car.stl --half y              # only the +Y half of a mirror-symmetric part
+stltosolid car.stl --half y --half-keep - --half-at 1.5   # the -Y half, plane 1.5 mm off the box centre
 ```
 
 Or from Python:

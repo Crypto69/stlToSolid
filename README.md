@@ -58,6 +58,9 @@ and cylinders, and holes that are real holes.
   instead (STEP only).
 
 Results open in Fusion 360 (or any CAD program that reads STEP).
+For a part that is the same on both sides, Mesh → Solid and Sliced Loft
+can write only one half, cut on its mirror plane, for you to mirror back
+in CAD.
 
 There is also a **Fusion 360 add-in,
 [Mesh to Outline](https://github.com/Crypto69/mesh-to-outline)**, that does the

@@ -21,8 +21,10 @@ const props = defineProps({
   hovered: { type: Number, default: -1 },
   // slicing planes, when a slicing tool is up: [{ axis: 'x'|'y'|'z',
   // offset: mm (converted units) from the box centre, kind: 'single' |
-  // 'start' | 'end' }]. The viewer draws a labelled XYZ triad (Fusion's
-  // colours) for the axis and one translucent plane per entry.
+  // 'start' | 'end' | 'half' }]. The viewer draws a labelled XYZ triad
+  // (Fusion's colours) for the first plane's axis and one translucent
+  // plane per entry. A 'half' plane (the half-model cut, keep: '+' | '-')
+  // may lie across another axis and is tagged with the side kept.
   planes: { type: Array, default: () => [] },
   // traced sections from /section, one per plane in the same order:
   // { polylines: [[[x,y,z]...]...] } in converted mm, drawn as bright
@@ -43,8 +45,27 @@ const failure = ref(null)
 const rawSize = ref(null)  // in file units
 const dims = computed(() =>
   rawSize.value && rawSize.value.map((v) => (v * props.unitScale).toFixed(1)))
-// the axis the planes cut across (all planes share it)
+// the axis the planes cut across (the slicing planes share it; a 'half'
+// plane may lie across another)
 const sliceAxis = computed(() => props.planes[0]?.axis || null)
+// the caption's words for the planes on show
+const planeCaption = computed(() => {
+  const slices = props.planes.filter((p) => p.kind !== 'half')
+  const half = props.planes.find((p) => p.kind === 'half')
+  const out = []
+  if (slices.length > 1) {
+    out.push(`planes = start (solid) and end (dashed) across ${slices[0].axis.toUpperCase()}`
+      + (props.sections.length ? ' · yellow = their traces' : ''))
+  } else if (slices.length === 1) {
+    out.push(`plane = the slice across ${slices[0].axis.toUpperCase()}`
+      + (props.sections.length ? ' · yellow = its trace' : ''))
+  }
+  if (half) {
+    const A = half.axis.toUpperCase()
+    out.push(`${slices.length ? `${A} plane` : 'plane'} = the half cut, keeping ${half.keep === '-' ? '\u2212' : '+'}${A}`)
+  }
+  return out.join(' · ')
+})
 
 let renderer, scene, camera, controls, mesh, grid, frameId, resizeObs
 let raycaster, pointer, triToBody = null, faceStart = null
@@ -507,19 +528,19 @@ function drawPlanes() {
     planeGroup.traverse((o) => { o.geometry?.dispose(); o.material?.dispose?.() })
     planeGroup = null
   }
-  const k = sliceAxis.value
-  if (!mesh || !localBox || !k || !props.planes.length) return
+  if (!mesh || !localBox || !sliceAxis.value || !props.planes.length) return
   const size = new THREE.Vector3()
   const center = new THREE.Vector3()
   localBox.getSize(size)
   localBox.getCenter(center)
   const span = Math.max(size.x, size.y, size.z)
   const pad = 1.15
-  // plane geometry lies in XY facing +Z; rotate it to face the axis
-  const w = k === 'x' ? size.y : size.x
-  const h = k === 'z' ? size.y : size.z
   planeGroup = new THREE.Group()
   for (const plane of props.planes) {
+    const k = plane.axis || sliceAxis.value
+    // plane geometry lies in XY facing +Z; rotate it to face the axis
+    const w = k === 'x' ? size.y : size.x
+    const h = k === 'z' ? size.y : size.z
     const end = plane.kind === 'end'
     // the plane sits at its offset (converted mm -> file units), clamped
     // to the box
@@ -552,6 +573,18 @@ function drawPlanes() {
       corner.applyEuler(pl.rotation).add(pl.position)
       tag.position.copy(corner)
       const ts = span * 0.06
+      tag.scale.set(ts, ts, 1)
+      planeGroup.add(tag)
+    }
+    if (plane.kind === 'half') {
+      // the side kept, as +X / -X on that side of the plane
+      const sgn = plane.keep === '-' ? -1 : 1
+      const tag = textSprite((sgn > 0 ? '+' : '\u2212') + k.toUpperCase(), AXIS_COLOR[k])
+      const corner = new THREE.Vector3(w * pad / 2, h * pad / 2, 0)
+      corner.applyEuler(pl.rotation).add(pl.position)
+      corner[k] += sgn * span * 0.08
+      tag.position.copy(corner)
+      const ts = span * 0.08
       tag.scale.set(ts, ts, 1)
       planeGroup.add(tag)
     }
@@ -802,7 +835,7 @@ onBeforeUnmount(() => {
       </button>
     </div>
     <div class="hint micro">
-      <template v-if="planePick"><span class="picking">click a face to place the plane<template v-if="!modelVisible"> (show the model first)</template> · Esc cancels</span> · </template>scroll zooms at the cursor · cube snaps the view<span v-if="triangleBody && !planePick"> · click a body to select it</span><span v-if="sliceAxis"> · <template v-if="planes.length > 1">planes = start (solid) and end (dashed) across {{ sliceAxis.toUpperCase() }}<span v-if="sections.length"> · yellow = their traces</span></template><template v-else>plane = the slice across {{ sliceAxis.toUpperCase() }}<span v-if="sections.length"> · yellow = its trace</span></template></span>
+      <template v-if="planePick"><span class="picking">click a face to place the plane<template v-if="!modelVisible"> (show the model first)</template> · Esc cancels</span> · </template>scroll zooms at the cursor · cube snaps the view<span v-if="triangleBody && !planePick"> · click a body to select it</span><span v-if="planeCaption"> · {{ planeCaption }}</span>
     </div>
   </div>
 </template>
